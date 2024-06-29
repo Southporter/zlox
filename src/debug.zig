@@ -15,6 +15,7 @@ fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize 
 
     return switch (@as(Chunk.Opcode, @enumFromInt(chunk.code[offset]))) {
         .@"return" => simpleInstruction("OP_RETURN", offset, writer),
+        .constant => constantInstruction(chunk, offset, writer),
     };
 }
 
@@ -23,19 +24,32 @@ fn simpleInstruction(name: []const u8, offset: usize, writer: anytype) !usize {
     return offset + 1;
 }
 
+fn constantInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
+    const index = chunk.code[offset + 1];
+    const constant = chunk.constants.items[index];
+    try writer.print("{s:<16} {d:>4} {any}\n", .{ "OP_CONSTANT", index, constant });
+    return offset + 2;
+}
+
 test "Simple dissassembly" {
     var chunk = try Chunk.init(std.testing.allocator);
     defer chunk.deinit();
     try chunk.write(0);
+    try chunk.write(1);
+    try chunk.write(0);
+    try chunk.addConstant(3.14);
 
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     var writer = stream.writer();
 
     try disassembleChunk(&chunk, "test", &writer);
-    try std.testing.expectEqualSlices(u8, buf[0..(11 + 5 + 10)],
+
+    const output =
         \\== test ==
         \\0000 OP_RETURN
+        \\0001 OP_CONSTANT         0 3.14e0
         \\
-    );
+    ;
+    try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);
 }
