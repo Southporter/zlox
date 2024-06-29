@@ -13,26 +13,30 @@ pub const Opcode = enum {
 code: []u8,
 count: usize = 0,
 constants: ValueArray,
+lines: std.ArrayListUnmanaged(usize),
 allocator: std.mem.Allocator,
 
 pub fn init(allocator: std.mem.Allocator) !Chunk {
     return .{
         .code = try allocator.alloc(u8, 8),
-        .constants = ValueArray.init(allocator),
+        .constants = ValueArray{},
+        .lines = std.ArrayListUnmanaged(usize){},
         .allocator = allocator,
     };
 }
 pub fn deinit(chunk: *Chunk) void {
-    chunk.constants.deinit();
+    chunk.constants.deinit(chunk.allocator);
+    chunk.lines.deinit(chunk.allocator);
     chunk.allocator.free(chunk.code);
     chunk.count = 0;
 }
 
-pub fn write(chunk: *Chunk, byte: u8) !void {
+pub fn write(chunk: *Chunk, byte: u8, line: usize) !void {
     if (chunk.code.len < chunk.count + 1) {
         try chunk.grow();
     }
     chunk.code[chunk.count] = byte;
+    try chunk.lines.append(chunk.allocator, line);
     chunk.count += 1;
 }
 
@@ -41,11 +45,12 @@ test "Write and reallocate" {
     defer chunk.deinit();
 
     for (0..18) |i| {
-        try chunk.write(@truncate(i));
+        try chunk.write(@truncate(i), i / 10);
     }
     try std.testing.expectEqual(chunk.count, 18);
     try std.testing.expectEqual(chunk.code.len, 32);
     try std.testing.expectEqualSlices(u8, &[18]u8{ 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17 }, chunk.code[0..chunk.count]);
+    try std.testing.expectEqualSlices(usize, &[18]usize{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 1, 1, 1, 1 }, chunk.lines.items[0..chunk.count]);
 }
 
 fn grow(chunk: *Chunk) !void {
@@ -54,5 +59,9 @@ fn grow(chunk: *Chunk) !void {
 }
 
 pub fn addConstant(chunk: *Chunk, value: Value) !void {
-    try chunk.constants.append(value);
+    try chunk.constants.append(chunk.allocator, value);
+}
+
+pub fn getConstant(chunk: *Chunk, index: usize) Value {
+    return chunk.constants.items[index];
 }
