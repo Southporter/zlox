@@ -27,13 +27,13 @@ pub fn deinit(vm: *VM) void {
 
 pub const Error = error{ CompileError, RuntimeError };
 
-pub fn interpret(vm: *VM, chunk: *Chunk) Error!void {
+pub fn interpret(vm: *VM, chunk: *Chunk) Error!Value {
     vm.chunk = chunk;
     vm.ip = 0;
     return vm.run();
 }
 
-fn run(vm: *VM) Error!void {
+fn run(vm: *VM) Error!Value {
     while (true) : (vm.ip += 1) {
         vm.printStack();
         _ = debug.disassembleInstruction(vm.chunk, vm.ip, debug.Writer) catch {};
@@ -42,7 +42,7 @@ fn run(vm: *VM) Error!void {
             .@"return" => {
                 const val = vm.pop();
                 values.print(val, log.debug);
-                return;
+                return val;
             },
             .constant => {
                 vm.ip += 1;
@@ -52,6 +52,18 @@ fn run(vm: *VM) Error!void {
             },
             .negate => {
                 vm.push(-vm.pop());
+            },
+            .add, .subtract, .multiply, .divide => {
+                const b = vm.pop();
+                const a = vm.pop();
+                const result = switch (op) {
+                    .add => a + b,
+                    .subtract => a - b,
+                    .multiply => a * b,
+                    .divide => a / b,
+                    else => unreachable,
+                };
+                vm.push(result);
             },
         }
     }
@@ -84,8 +96,37 @@ test "basic run" {
     defer chunk.deinit();
     try chunk.write(1, 0);
     try chunk.write(0, 0);
-    try chunk.addConstant(3.14156);
+    try chunk.addConstant(3.14);
     try chunk.write(0, 0);
 
-    try vm.interpret(&chunk);
+    const res = try vm.interpret(&chunk);
+    try std.testing.expectEqual(3.14, res);
+}
+
+test "basic arithmatic" {
+    var vm = VM.init();
+    var chunk = try Chunk.init(std.testing.allocator);
+    defer chunk.deinit();
+    const pi = 3.1415926;
+    try chunk.writeOp(.constant, 0);
+    try chunk.write(0, 0);
+    try chunk.addConstant(pi);
+    try chunk.writeOp(.constant, 0);
+    try chunk.write(1, 0);
+    try chunk.addConstant(2.0);
+    try chunk.writeOp(.multiply, 0);
+    try chunk.writeOp(.constant, 0);
+    try chunk.write(1, 0);
+    try chunk.writeOp(.divide, 0);
+    try chunk.writeOp(.constant, 0);
+    try chunk.write(1, 0);
+    try chunk.writeOp(.add, 0);
+    try chunk.writeOp(.constant, 0);
+    try chunk.write(1, 0);
+    try chunk.writeOp(.subtract, 0);
+    try chunk.writeOp(.negate, 0);
+    try chunk.writeOp(.@"return", 0);
+
+    const res = try vm.interpret(&chunk);
+    try std.testing.expectEqual(-pi, res);
 }

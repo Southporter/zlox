@@ -34,6 +34,10 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .@"return" => simpleInstruction("OP_RETURN", offset, writer),
         .constant => constantInstruction(chunk, offset, writer),
         .negate => simpleInstruction("OP_NEGATE", offset, writer),
+        .add => simpleInstruction("OP_ADD", offset, writer),
+        .subtract => simpleInstruction("OP_SUBTRACT", offset, writer),
+        .multiply => simpleInstruction("OP_MULTIPLY", offset, writer),
+        .divide => simpleInstruction("OP_DIVIDE", offset, writer),
     };
 }
 
@@ -52,11 +56,15 @@ fn constantInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
 test "Simple dissassembly" {
     var chunk = try Chunk.init(std.testing.allocator);
     defer chunk.deinit();
-    try chunk.write(0, 123);
-    try chunk.write(1, 123);
+    try chunk.writeOp(.@"return", 123);
+    try chunk.writeOp(.constant, 123);
     try chunk.write(0, 123);
     try chunk.addConstant(3.14);
-    try chunk.write(@intFromEnum(Chunk.Opcode.negate), 124);
+    try chunk.writeOp(.negate, 124);
+    try chunk.writeOp(.add, 124);
+    try chunk.writeOp(.subtract, 124);
+    try chunk.writeOp(.multiply, 124);
+    try chunk.writeOp(.divide, 124);
 
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -69,6 +77,10 @@ test "Simple dissassembly" {
         \\0000  123 OP_RETURN
         \\0001    | OP_CONSTANT         0 3.14e0
         \\0003  124 OP_NEGATE
+        \\0004    | OP_ADD
+        \\0005    | OP_SUBTRACT
+        \\0006    | OP_MULTIPLY
+        \\0007    | OP_DIVIDE
         \\
     ;
     try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);

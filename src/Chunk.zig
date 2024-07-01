@@ -9,6 +9,10 @@ pub const Opcode = enum(u8) {
     @"return",
     constant,
     negate,
+    add,
+    subtract,
+    multiply,
+    divide,
 };
 
 code: []u8,
@@ -30,6 +34,10 @@ pub fn deinit(chunk: *Chunk) void {
     chunk.lines.deinit(chunk.allocator);
     chunk.allocator.free(chunk.code);
     chunk.count = 0;
+}
+
+pub fn writeOp(chunk: *Chunk, op: Opcode, line: usize) !void {
+    return chunk.write(@intFromEnum(op), line);
 }
 
 pub fn write(chunk: *Chunk, byte: u8, line: usize) !void {
