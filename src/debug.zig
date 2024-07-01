@@ -3,6 +3,18 @@ const Chunk = @import("Chunk.zig");
 
 const log = std.log.scoped(.debugger);
 
+pub const LogWriter = struct {
+    pub fn print(_: *const LogWriter, comptime format: []const u8, args: anytype) !void {
+        log.debug(format, args);
+    }
+
+    pub fn write(_: *const LogWriter, comptime out: []const u8) !void {
+        log.debug(out, .{});
+    }
+};
+
+pub const Writer = LogWriter{};
+
 pub fn disassembleChunk(chunk: *Chunk, name: []const u8, writer: anytype) !void {
     try writer.print("== {s} ==\n", .{name});
 
@@ -10,7 +22,7 @@ pub fn disassembleChunk(chunk: *Chunk, name: []const u8, writer: anytype) !void 
     while (offset < chunk.count) : (offset = try disassembleInstruction(chunk, offset, writer)) {}
 }
 
-fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
+pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
     try writer.print("{d:0>4} ", .{offset});
     if (offset > 0 and chunk.lines.items[offset] == chunk.lines.items[offset - 1]) {
         _ = try writer.write("   | ");
@@ -21,6 +33,7 @@ fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize 
     return switch (@as(Chunk.Opcode, @enumFromInt(chunk.code[offset]))) {
         .@"return" => simpleInstruction("OP_RETURN", offset, writer),
         .constant => constantInstruction(chunk, offset, writer),
+        .negate => simpleInstruction("OP_NEGATE", offset, writer),
     };
 }
 
@@ -43,6 +56,7 @@ test "Simple dissassembly" {
     try chunk.write(1, 123);
     try chunk.write(0, 123);
     try chunk.addConstant(3.14);
+    try chunk.write(@intFromEnum(Chunk.Opcode.negate), 124);
 
     var buf: [256]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -54,6 +68,7 @@ test "Simple dissassembly" {
         \\== test ==
         \\0000  123 OP_RETURN
         \\0001    | OP_CONSTANT         0 3.14e0
+        \\0003  124 OP_NEGATE
         \\
     ;
     try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);

@@ -5,9 +5,10 @@ const values = @import("values.zig");
 const ValueArray = values.ValueArray;
 const Value = values.Value;
 
-pub const Opcode = enum {
+pub const Opcode = enum(u8) {
     @"return",
     constant,
+    negate,
 };
 
 code: []u8,
