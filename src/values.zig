@@ -1,9 +1,53 @@
 const std = @import("std");
 
-pub const Value = f64;
+pub const TRUE_VAL = Value{ .boolean = true };
+pub const FALSE_VAL = Value{ .boolean = false };
+pub const NIL_VAL = Value{ .nil = {} };
+pub const ValueTag = enum {
+    nil,
+    boolean,
+    number,
+};
+pub const Value = union(ValueTag) {
+    nil: void,
+    boolean: bool,
+    number: f64,
+
+    pub fn isNumber(value: *const Value) bool {
+        return switch (value.*) {
+            .number => true,
+            else => false,
+        };
+    }
+    pub fn isBoolean(value: *const Value) bool {
+        return switch (value.*) {
+            .boolean => true,
+            else => false,
+        };
+    }
+    pub fn isFalsey(value: *const Value) Value {
+        return switch (value.*) {
+            .nil => TRUE_VAL,
+            .boolean => |val| if (val) FALSE_VAL else TRUE_VAL,
+            else => FALSE_VAL,
+        };
+    }
+    pub fn equal(a: *const Value, b: Value) bool {
+        if (std.meta.activeTag(a.*) != std.meta.activeTag(b)) return false;
+        return switch (a.*) {
+            .nil => true,
+            .boolean => |val| val == b.boolean,
+            .number => |val| val == b.number,
+        };
+    }
+};
 
 pub const ValueArray = std.ArrayListUnmanaged(Value);
 
 pub fn print(value: Value, printer: *const fn (comptime []const u8, anytype) void) void {
-    printer("{d}", .{value});
+    switch (value) {
+        .number => printer("{d}", .{value.number}),
+        .boolean => printer("{}", .{value.boolean}),
+        .nil => printer("nil", .{}),
+    }
 }

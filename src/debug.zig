@@ -33,7 +33,14 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
     return switch (@as(Chunk.Opcode, @enumFromInt(chunk.code[offset]))) {
         .@"return" => simpleInstruction("OP_RETURN", offset, writer),
         .constant => constantInstruction(chunk, offset, writer),
+        .true => simpleInstruction("OP_TRUE", offset, writer),
+        .false => simpleInstruction("OP_FALSE", offset, writer),
+        .nil => simpleInstruction("OP_NIL", offset, writer),
         .negate => simpleInstruction("OP_NEGATE", offset, writer),
+        .not => simpleInstruction("OP_NOT", offset, writer),
+        .equal => simpleInstruction("OP_EQUAL", offset, writer),
+        .greater => simpleInstruction("OP_GREATER", offset, writer),
+        .less => simpleInstruction("OP_LESS", offset, writer),
         .add => simpleInstruction("OP_ADD", offset, writer),
         .subtract => simpleInstruction("OP_SUBTRACT", offset, writer),
         .multiply => simpleInstruction("OP_MULTIPLY", offset, writer),
@@ -49,7 +56,12 @@ fn simpleInstruction(name: []const u8, offset: usize, writer: anytype) !usize {
 fn constantInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
     const index = chunk.code[offset + 1];
     const constant = chunk.constants.items[index];
-    try writer.print("{s:<16} {d:>4} {any}\n", .{ "OP_CONSTANT", index, constant });
+    try writer.print("{s:<16} {d:>4} ", .{ "OP_CONSTANT", index });
+    switch (constant) {
+        .number => |val| try writer.print("{any}\n", .{val}),
+        .boolean => |val| try writer.print("{}\n", .{val}),
+        .nil => _ = try writer.write("nil\n"),
+    }
     return offset + 2;
 }
 
@@ -58,15 +70,21 @@ test "Simple dissassembly" {
     defer chunk.deinit();
     try chunk.writeOp(.@"return", 123);
     try chunk.writeOp(.constant, 123);
-    try chunk.write(0, 123);
-    try chunk.addConstant(3.14);
+    const pi_index = try chunk.addConstant(3.14);
+    try chunk.write(pi_index, 123);
     try chunk.writeOp(.negate, 124);
     try chunk.writeOp(.add, 124);
     try chunk.writeOp(.subtract, 124);
     try chunk.writeOp(.multiply, 124);
     try chunk.writeOp(.divide, 124);
+    try chunk.writeOp(.nil, 125);
+    try chunk.writeOp(.true, 125);
+    try chunk.writeOp(.false, 125);
+    try chunk.writeOp(.equal, 125);
+    try chunk.writeOp(.greater, 125);
+    try chunk.writeOp(.less, 125);
 
-    var buf: [256]u8 = undefined;
+    var buf: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     var writer = stream.writer();
 
@@ -81,6 +99,12 @@ test "Simple dissassembly" {
         \\0005    | OP_SUBTRACT
         \\0006    | OP_MULTIPLY
         \\0007    | OP_DIVIDE
+        \\0008  125 OP_NIL
+        \\0009    | OP_TRUE
+        \\0010    | OP_FALSE
+        \\0011    | OP_EQUAL
+        \\0012    | OP_GREATER
+        \\0013    | OP_LESS
         \\
     ;
     try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);

@@ -8,7 +8,14 @@ const Value = values.Value;
 pub const Opcode = enum(u8) {
     @"return",
     constant,
+    nil,
+    true,
+    false,
     negate,
+    not,
+    equal,
+    greater,
+    less,
     add,
     subtract,
     multiply,
@@ -67,8 +74,13 @@ fn grow(chunk: *Chunk) !void {
     chunk.code = try chunk.allocator.realloc(chunk.code, new_cap);
 }
 
-pub fn addConstant(chunk: *Chunk, value: Value) !void {
-    try chunk.constants.append(chunk.allocator, value);
+pub fn addConstant(chunk: *Chunk, value: f64) !u8 {
+    try chunk.constants.append(chunk.allocator, Value{ .number = value });
+    const index = chunk.constants.items.len - 1;
+    if (index > std.math.maxInt(u8)) {
+        return error.ConstantOverflow;
+    }
+    return @intCast(index);
 }
 
 pub fn getConstant(chunk: *Chunk, index: usize) Value {
