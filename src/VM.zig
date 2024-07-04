@@ -69,7 +69,7 @@ fn run(vm: *VM) Error!Value {
                     var value = vm.get(0);
                     value.number = -value.number;
                 },
-                .boolean, .nil => {
+                .boolean, .nil, .object => {
                     vm.runtimeError("Operand must be a number.", .{});
                     return error.RuntimeError;
                 },
@@ -142,7 +142,7 @@ test "basic run" {
     defer chunk.deinit();
     try chunk.write(1, 0);
     try chunk.write(0, 0);
-    const index = try chunk.addConstant(3.14);
+    const index = try chunk.addConstant(.{ .number = 3.14 });
     try chunk.write(index, 0);
 
     const res = try vm.interpretChunk(&chunk);
@@ -155,10 +155,10 @@ test "basic arithmatic" {
     defer chunk.deinit();
     const pi = 3.1415926;
     try chunk.writeOp(.constant, 0);
-    const pi_index = try chunk.addConstant(pi);
+    const pi_index = try chunk.addConstant(.{ .number = pi });
     try chunk.write(pi_index, 0);
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(2.0);
+    const two_index = try chunk.addConstant(.{ .number = 2.0 });
     try chunk.write(two_index, 0);
     try chunk.writeOp(.multiply, 0);
     try chunk.writeOp(.constant, 0);
@@ -194,11 +194,11 @@ test "Comparison: less" {
     defer chunk.deinit();
     const two = 2.0;
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(two);
+    const two_index = try chunk.addConstant(.{ .number = two });
     try chunk.write(two_index, 0);
     const three = 3.0;
     try chunk.writeOp(.constant, 0);
-    const three_index = try chunk.addConstant(three);
+    const three_index = try chunk.addConstant(.{ .number = three });
     try chunk.write(three_index, 0);
 
     try chunk.writeOp(.less, 0);
@@ -214,11 +214,11 @@ test "Comparison: greater" {
     defer chunk.deinit();
     const two = 2.0;
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(two);
+    const two_index = try chunk.addConstant(.{ .number = two });
     try chunk.write(two_index, 0);
     const three = 3.0;
     try chunk.writeOp(.constant, 0);
-    const three_index = try chunk.addConstant(three);
+    const three_index = try chunk.addConstant(.{ .number = three });
     try chunk.write(three_index, 0);
 
     try chunk.writeOp(.greater, 0);
@@ -234,11 +234,11 @@ test "Equality" {
     defer chunk.deinit();
     const two = 2.0;
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(two);
+    const two_index = try chunk.addConstant(.{ .number = two });
     try chunk.write(two_index, 0);
     const three = 3.0;
     try chunk.writeOp(.constant, 0);
-    const three_index = try chunk.addConstant(three);
+    const three_index = try chunk.addConstant(.{ .number = three });
     try chunk.write(three_index, 0);
 
     try chunk.writeOp(.equal, 0);

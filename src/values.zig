@@ -1,4 +1,5 @@
 const std = @import("std");
+const Object = @import("Object.zig");
 
 pub const TRUE_VAL = Value{ .boolean = true };
 pub const FALSE_VAL = Value{ .boolean = false };
@@ -7,11 +8,13 @@ pub const ValueTag = enum {
     nil,
     boolean,
     number,
+    object,
 };
 pub const Value = union(ValueTag) {
     nil: void,
     boolean: bool,
     number: f64,
+    object: *Object,
 
     pub fn isNumber(value: *const Value) bool {
         return switch (value.*) {
@@ -38,16 +41,26 @@ pub const Value = union(ValueTag) {
             .nil => true,
             .boolean => |val| val == b.boolean,
             .number => |val| val == b.number,
+            .object => a.*.object == b.object,
         };
     }
 };
 
 pub const ValueArray = std.ArrayListUnmanaged(Value);
 
-pub fn print(value: Value, printer: *const fn (comptime []const u8, anytype) void) void {
+const Printer = *const fn (comptime []const u8, anytype) void;
+
+pub fn print(value: Value, printer: Printer) void {
     switch (value) {
         .number => printer("{d}", .{value.number}),
         .boolean => printer("{}", .{value.boolean}),
         .nil => printer("nil", .{}),
+        .object => printObject(value.object, printer),
+    }
+}
+
+pub fn printObject(object: *Object, printer: Printer) void {
+    switch (object.tag) {
+        .string => printer("{s}", .{object.asString().data}),
     }
 }

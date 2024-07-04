@@ -74,8 +74,8 @@ fn grow(chunk: *Chunk) !void {
     chunk.code = try chunk.allocator.realloc(chunk.code, new_cap);
 }
 
-pub fn addConstant(chunk: *Chunk, value: f64) !u8 {
-    try chunk.constants.append(chunk.allocator, Value{ .number = value });
+pub fn addConstant(chunk: *Chunk, value: Value) !u8 {
+    try chunk.constants.append(chunk.allocator, value);
     const index = chunk.constants.items.len - 1;
     if (index > std.math.maxInt(u8)) {
         return error.ConstantOverflow;

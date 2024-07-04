@@ -61,6 +61,11 @@ fn constantInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
         .number => |val| try writer.print("{any}\n", .{val}),
         .boolean => |val| try writer.print("{}\n", .{val}),
         .nil => _ = try writer.write("nil\n"),
+        .object => |obj| {
+            switch (obj.tag) {
+                .string => try writer.print("{s}\n", .{obj.asString().data}),
+            }
+        },
     }
     return offset + 2;
 }
@@ -70,7 +75,7 @@ test "Simple dissassembly" {
     defer chunk.deinit();
     try chunk.writeOp(.@"return", 123);
     try chunk.writeOp(.constant, 123);
-    const pi_index = try chunk.addConstant(3.14);
+    const pi_index = try chunk.addConstant(.{ .number = 3.14 });
     try chunk.write(pi_index, 123);
     try chunk.writeOp(.negate, 124);
     try chunk.writeOp(.add, 124);

@@ -3,6 +3,7 @@ const Compiler = @This();
 const Scanner = @import("Scanner.zig");
 const Chunk = @import("Chunk.zig");
 const values = @import("values.zig");
+const Object = @import("Object.zig");
 
 parser: Parser,
 chunk: *Chunk = undefined,
@@ -131,6 +132,10 @@ const rules = blk: {
         .prefix = number,
         .precedence = .primary,
     });
+    map.set(.string, ParseRule{
+        .prefix = string,
+        .precedence = .primary,
+    });
     map.set(.true, ParseRule{
         .prefix = literal,
     });
@@ -177,9 +182,9 @@ fn getRule(tag: Scanner.TokenType) ParseRule {
 
 fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!void {
     compiler.parser.advance();
-    const prefix = getRule(compiler.parser.previous.?.tag).prefix;
-    if (prefix) |f| {
-        try f(compiler);
+    const prefix_fn = getRule(compiler.parser.previous.?.tag).prefix;
+    if (prefix_fn) |prefix| {
+        try prefix(compiler);
     } else {
         compiler.parser.err("Expect expression.");
         return;
@@ -187,9 +192,9 @@ fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!voi
 
     while (getRule(compiler.parser.current.?.tag).precedence.greater(precedence)) {
         compiler.parser.advance();
-        const infix = getRule(compiler.parser.previous.?.tag).infix;
-        if (infix) |f| {
-            try f(compiler);
+        const infix_fn = getRule(compiler.parser.previous.?.tag).infix;
+        if (infix_fn) |infix| {
+            try infix(compiler);
         } else {
             compiler.parser.err("Expected infix.");
         }
@@ -231,11 +236,11 @@ fn emitOpOp(compiler: *Compiler, op: Chunk.Opcode, op2: Chunk.Opcode) !void {
     try compiler.emitOp(op2);
 }
 
-fn emitConstant(compiler: *Compiler, constant: f64) !void {
+fn emitConstant(compiler: *Compiler, constant: values.Value) !void {
     try compiler.emitOpAndArg(.constant, try compiler.makeConstant(constant));
 }
 
-fn makeConstant(compiler: *Compiler, constant: f64) !u8 {
+fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
     const index = compiler.currentChunk().addConstant(constant) catch |e| cth: {
         switch (e) {
             error.ConstantOverflow => {
@@ -254,7 +259,16 @@ fn expression(compiler: *Compiler) CompileError!void {
 
 fn number(compiler: *Compiler) CompileError!void {
     const val = try std.fmt.parseFloat(f64, compiler.parser.previous.?.raw);
-    try compiler.emitConstant(val);
+    try compiler.emitConstant(.{ .number = val });
+}
+
+fn string(compiler: *Compiler) CompileError!void {
+    try compiler.emitConstant(.{ .object = try compiler.copyString() });
+}
+
+fn copyString(compiler: *Compiler) !*Object {
+    const original = compiler.parser.previous.?.raw;
+    return try Object.String.copy(original[1 .. original.len - 1], compiler.currentChunk().allocator);
 }
 
 fn literal(compiler: *Compiler) CompileError!void {
