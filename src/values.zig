@@ -35,13 +35,19 @@ pub const Value = union(ValueTag) {
             else => FALSE_VAL,
         };
     }
+    pub fn isString(value: *const Value) bool {
+        return switch (value.*) {
+            .object => |obj| obj.tag == .string,
+            else => false,
+        };
+    }
     pub fn equal(a: *const Value, b: Value) bool {
         if (std.meta.activeTag(a.*) != std.meta.activeTag(b)) return false;
         return switch (a.*) {
             .nil => true,
             .boolean => |val| val == b.boolean,
             .number => |val| val == b.number,
-            .object => a.*.object == b.object,
+            .object => |obj| obj.equal(b.object),
         };
     }
 };

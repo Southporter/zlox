@@ -268,7 +268,7 @@ fn string(compiler: *Compiler) CompileError!void {
 
 fn copyString(compiler: *Compiler) !*Object {
     const original = compiler.parser.previous.?.raw;
-    return try Object.String.copy(original[1 .. original.len - 1], compiler.currentChunk().allocator);
+    return try Object.String.copy(original[1 .. original.len - 1], compiler.currentChunk().allocator());
 }
 
 fn literal(compiler: *Compiler) CompileError!void {

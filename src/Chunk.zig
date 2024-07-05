@@ -26,21 +26,23 @@ code: []u8,
 count: usize = 0,
 constants: ValueArray,
 lines: std.ArrayListUnmanaged(usize),
-allocator: std.mem.Allocator,
+arena: std.heap.ArenaAllocator,
 
-pub fn init(allocator: std.mem.Allocator) !Chunk {
+pub fn init(child_allocator: std.mem.Allocator) !Chunk {
+    var arena = std.heap.ArenaAllocator.init(child_allocator);
     return .{
-        .code = try allocator.alloc(u8, 8),
+        .code = try arena.allocator().alloc(u8, 8),
         .constants = ValueArray{},
         .lines = std.ArrayListUnmanaged(usize){},
-        .allocator = allocator,
+        .arena = arena,
     };
 }
 pub fn deinit(chunk: *Chunk) void {
-    chunk.constants.deinit(chunk.allocator);
-    chunk.lines.deinit(chunk.allocator);
-    chunk.allocator.free(chunk.code);
-    chunk.count = 0;
+    chunk.arena.deinit();
+}
+
+pub fn allocator(chunk: *Chunk) std.mem.Allocator {
+    return chunk.arena.allocator();
 }
 
 pub fn writeOp(chunk: *Chunk, op: Opcode, line: usize) !void {
@@ -52,7 +54,7 @@ pub fn write(chunk: *Chunk, byte: u8, line: usize) !void {
         try chunk.grow();
     }
     chunk.code[chunk.count] = byte;
-    try chunk.lines.append(chunk.allocator, line);
+    try chunk.lines.append(chunk.allocator(), line);
     chunk.count += 1;
 }
 
@@ -71,11 +73,11 @@ test "Write and reallocate" {
 
 fn grow(chunk: *Chunk) !void {
     const new_cap = if (chunk.code.len < 8) 8 else chunk.code.len * 2;
-    chunk.code = try chunk.allocator.realloc(chunk.code, new_cap);
+    chunk.code = try chunk.allocator().realloc(chunk.code, new_cap);
 }
 
 pub fn addConstant(chunk: *Chunk, value: Value) !u8 {
-    try chunk.constants.append(chunk.allocator, value);
+    try chunk.constants.append(chunk.allocator(), value);
     const index = chunk.constants.items.len - 1;
     if (index > std.math.maxInt(u8)) {
         return error.ConstantOverflow;

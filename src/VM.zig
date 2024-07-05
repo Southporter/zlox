@@ -4,6 +4,7 @@ const log = std.log.scoped(.vm);
 const VM = @This();
 const Compiler = @import("Compiler.zig");
 const Chunk = @import("Chunk.zig");
+const Object = @import("Object.zig");
 const values = @import("values.zig");
 const Value = values.Value;
 const debug = @import("debug.zig");
@@ -15,6 +16,7 @@ chunk: *Chunk,
 stack: [STACK_MAX]Value = undefined,
 stackTop: usize = 0,
 allocator: std.mem.Allocator,
+objects: ?*Object = null,
 
 pub fn init(allocator: std.mem.Allocator) VM {
     return .{
@@ -26,6 +28,11 @@ pub fn init(allocator: std.mem.Allocator) VM {
 pub fn deinit(vm: *VM) void {
     vm.stackTop = 0;
     vm.ip = 0;
+    var object = vm.objects;
+    while (object) |obj| {
+        object = obj.next;
+        obj.deinit(vm.allocator);
+    }
 }
 
 pub const Error = error{ CompileError, RuntimeError } || std.mem.Allocator.Error;
@@ -80,7 +87,19 @@ fn run(vm: *VM) Error!Value {
                 const a = vm.pop();
                 vm.push(.{ .boolean = a.equal(b) });
             },
-            .add, .subtract, .multiply, .divide, .less, .greater => {
+            .add => {
+                if (vm.peek(0).isString() and vm.peek(1).isString()) {
+                    try vm.concatenate();
+                } else if (vm.peek(0).isNumber() and vm.peek(1).isNumber()) {
+                    const b = vm.pop();
+                    const a = vm.pop();
+                    vm.push(.{ .number = a.number + b.number });
+                } else {
+                    vm.runtimeError("Operands must be two numbers or two strings.", .{});
+                    return error.RuntimeError;
+                }
+            },
+            .subtract, .multiply, .divide, .less, .greater => {
                 if (!vm.peek(0).isNumber() or !vm.peek(1).isNumber()) {
                     vm.runtimeError("Operands must be numbers.", .{});
                     return error.RuntimeError;
@@ -88,7 +107,6 @@ fn run(vm: *VM) Error!Value {
                 const b = vm.pop();
                 const a = vm.pop();
                 const result: Value = switch (op) {
-                    .add => .{ .number = a.number + b.number },
                     .subtract => .{ .number = a.number - b.number },
                     .multiply => .{ .number = a.number * b.number },
                     .divide => .{ .number = a.number / b.number },
@@ -117,6 +135,15 @@ fn peek(vm: *VM, distance: usize) Value {
 }
 fn get(vm: *VM, distance: usize) *Value {
     return &vm.stack[vm.stackTop - 1 - distance];
+}
+
+fn concatenate(vm: *VM) !void {
+    const b = vm.pop();
+    const a = vm.pop();
+    const obj = try a.object.asString().concat(b.object.asString(), vm.allocator);
+    obj.next = vm.objects;
+    vm.objects = obj;
+    vm.push(.{ .object = obj });
 }
 
 fn runtimeError(vm: *VM, comptime fmt: []const u8, args: anytype) void {
@@ -258,6 +285,20 @@ test "Chapter 18 end" {
         \\
     ;
     var vm = VM.init(std.testing.allocator);
+    defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqual(Value{ .boolean = true }, res);
+}
+
+test "Chapter 19" {
+    const input =
+        \\ "Hello" + " " + "World!"
+        \\
+    ;
+    var vm = VM.init(std.testing.allocator);
+    defer vm.deinit();
+    const res = try vm.interpret(input);
+    const str_res = res.object.asString();
+    try std.testing.expectEqualStrings("Hello World!", str_res.data);
+    try std.testing.expectEqual(res.object, vm.objects.?);
 }
