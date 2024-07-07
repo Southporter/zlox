@@ -14,7 +14,7 @@ pub fn repl(allocator: std.mem.Allocator) !void {
         _ = try out.write("> ");
         const count = try in.read(&line);
         var vm = VM.init(arena.allocator());
-        const val = try vm.interpret(line[0..count]);
+        const val = vm.interpret(line[0..count]) catch continue;
         values.print(val, log.info);
         vm.deinit();
         _ = arena.reset(.retain_capacity);

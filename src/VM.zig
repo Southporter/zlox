@@ -103,7 +103,6 @@ fn run(vm: *VM) Error!Value {
                 }
             },
             .print => {
-                std.debug.print("Printing: {any}\n", .{vm});
                 values.print(vm.pop(), log.info);
                 log.info("\n", .{});
             },
