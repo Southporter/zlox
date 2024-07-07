@@ -7,7 +7,12 @@ const Value = values.Value;
 
 pub const Opcode = enum(u8) {
     @"return",
+    print,
+    pop,
     constant,
+    define_global,
+    get_global,
+    set_global,
     nil,
     true,
     false,

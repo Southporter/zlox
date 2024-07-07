@@ -8,6 +8,8 @@ const Object = @import("Object.zig");
 const values = @import("values.zig");
 const Value = values.Value;
 const debug = @import("debug.zig");
+const StringPool = @import("StringPool.zig");
+const Table = @import("Table.zig");
 
 const STACK_MAX = 256;
 
@@ -17,11 +19,15 @@ stack: [STACK_MAX]Value = undefined,
 stackTop: usize = 0,
 allocator: std.mem.Allocator,
 objects: ?*Object = null,
+strings: StringPool,
+globals: Table,
 
 pub fn init(allocator: std.mem.Allocator) VM {
     return .{
         .chunk = undefined,
         .allocator = allocator,
+        .strings = StringPool.init(allocator),
+        .globals = Table.init(allocator) catch unreachable,
     };
 }
 
@@ -33,15 +39,19 @@ pub fn deinit(vm: *VM) void {
         object = obj.next;
         obj.deinit(vm.allocator);
     }
+    vm.strings.deinit();
+    vm.globals.deinit();
 }
 
 pub const Error = error{ CompileError, RuntimeError } || std.mem.Allocator.Error;
 
 pub fn interpret(vm: *VM, input: []const u8) Error!Value {
     var compiler: Compiler = undefined;
+    compiler.string_pool = &vm.strings;
     var chunk = try Chunk.init(vm.allocator);
     defer chunk.deinit();
-    _ = compiler.compile(input, &chunk) catch return error.CompileError;
+    const success = compiler.compile(input, &chunk) catch return error.CompileError;
+    if (!success) return error.CompileError;
     return try vm.interpretChunk(&chunk);
 }
 
@@ -52,22 +62,52 @@ fn interpretChunk(vm: *VM, chunk: *Chunk) Error!Value {
 }
 
 fn run(vm: *VM) Error!Value {
+    var ret = values.NIL_VAL;
     while (true) : (vm.ip += 1) {
         vm.printStack();
-        _ = debug.disassembleInstruction(vm.chunk, vm.ip, debug.Writer) catch {};
+        // _ = debug.disassembleInstruction(vm.chunk, vm.ip, debug.Writer) catch {};
         const op: Chunk.Opcode = @enumFromInt(vm.chunk.code[vm.ip]);
         switch (op) {
             .@"return" => {
-                const val = vm.pop();
-                values.print(val, log.debug);
-                return val;
+                if (vm.stackTop > 0) {
+                    return vm.pop();
+                } else {
+                    return ret;
+                }
             },
             .constant => {
-                vm.ip += 1;
-                const index = vm.chunk.code[vm.ip];
-                const constant = vm.chunk.getConstant(index);
-                vm.push(constant);
+                vm.push(vm.getConstant());
             },
+            .define_global => {
+                const constant = vm.getConstant();
+                log.debug("Defining global: {any}", .{constant});
+                const name = constant.object.asString();
+                _ = try vm.globals.set(name, vm.peek(0));
+                _ = vm.pop();
+            },
+            .get_global => {
+                const name = vm.getConstant().object.asString();
+                const value = vm.globals.get(name);
+                if (value) |val| {
+                    vm.push(val);
+                } else {
+                    vm.runtimeError("Undefined variable '{s}'.", .{name.data});
+                }
+            },
+            .set_global => {
+                const name = vm.getConstant().object.asString();
+                if (try vm.globals.set(name, vm.peek(0))) {
+                    _ = vm.globals.delete(name);
+                    vm.runtimeError("Undefined variable '{s}'.", .{name.data});
+                    return error.RuntimeError;
+                }
+            },
+            .print => {
+                std.debug.print("Printing: {any}\n", .{vm});
+                values.print(vm.pop(), log.info);
+                log.info("\n", .{});
+            },
+            .pop => ret = vm.pop(),
             .true => vm.push(values.TRUE_VAL),
             .false => vm.push(values.FALSE_VAL),
             .nil => vm.push(values.NIL_VAL),
@@ -137,13 +177,32 @@ fn get(vm: *VM, distance: usize) *Value {
     return &vm.stack[vm.stackTop - 1 - distance];
 }
 
+fn getConstant(vm: *VM) Value {
+    vm.ip += 1;
+    const index = vm.chunk.code[vm.ip];
+    return vm.chunk.getConstant(index);
+}
+
 fn concatenate(vm: *VM) !void {
     const b = vm.pop();
     const a = vm.pop();
-    const obj = try a.object.asString().concat(b.object.asString(), vm.allocator);
-    obj.next = vm.objects;
-    vm.objects = obj;
-    vm.push(.{ .object = obj });
+    const str_a = a.object.asString();
+    const str_b = b.object.asString();
+
+    var new_raw = try vm.allocator.alloc(u8, str_a.data.len + str_b.data.len);
+    @memcpy(new_raw[0..str_a.data.len], str_a.data);
+    @memcpy(new_raw[str_a.data.len..], str_b.data);
+    if (vm.strings.find(new_raw)) |interned| {
+        vm.push(.{ .object = &interned.object });
+        vm.allocator.free(new_raw);
+    } else {
+        const str = try Object.String.fromAlloc(new_raw, vm.allocator);
+        try vm.strings.set(str, values.NIL_VAL);
+        const obj = &str.object;
+        str.object.next = vm.objects;
+        vm.objects = obj;
+        vm.push(.{ .object = obj });
+    }
 }
 
 fn runtimeError(vm: *VM, comptime fmt: []const u8, args: anytype) void {
@@ -167,10 +226,10 @@ test "basic run" {
     var vm = VM.init(std.testing.allocator);
     var chunk = try Chunk.init(std.testing.allocator);
     defer chunk.deinit();
-    try chunk.write(1, 0);
-    try chunk.write(0, 0);
     const index = try chunk.addConstant(.{ .number = 3.14 });
+    try chunk.writeOp(.constant, 0);
     try chunk.write(index, 0);
+    try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretChunk(&chunk);
     try std.testing.expectEqual(3.14, res.number);
@@ -281,7 +340,7 @@ test "Equality" {
 }
 test "Chapter 18 end" {
     const input =
-        \\ !(5 - 4 > 3 * 2 == !nil)
+        \\ return !(5 - 4 > 3 * 2 == !nil);
         \\
     ;
     var vm = VM.init(std.testing.allocator);
@@ -292,7 +351,7 @@ test "Chapter 18 end" {
 
 test "Chapter 19" {
     const input =
-        \\ "Hello" + " " + "World!"
+        \\ return "Hello" + " " + "World!";
         \\
     ;
     var vm = VM.init(std.testing.allocator);
@@ -301,4 +360,39 @@ test "Chapter 19" {
     const str_res = res.object.asString();
     try std.testing.expectEqualStrings("Hello World!", str_res.data);
     try std.testing.expectEqual(res.object, vm.objects.?);
+}
+
+test "Chapter 20: String equality" {
+    const input =
+        \\ return ("He" + "llo") == "Hello";
+        \\
+    ;
+
+    var vm = VM.init(std.testing.allocator);
+    defer vm.deinit();
+    const res = try vm.interpret(input);
+    try std.testing.expect(res.boolean);
+    // Because of interning, the "Hello" created by concatenation
+    // will reference the same string as the "Hello" constant.
+    // It should not be added to the objects tracking list
+    try std.testing.expectEqual(null, vm.objects);
+}
+
+test "Chapter 21: Globals" {
+    const input =
+        \\ var breakfast = "beignets";
+        \\ var beverage = "cafe au lait";
+        \\ breakfast = "beignets with " + beverage;
+        \\
+        \\ return breakfast;
+        \\
+    ;
+    const expected = "beignets with cafe au lait";
+
+    var vm = VM.init(std.testing.allocator);
+    defer vm.deinit();
+    const res = try vm.interpret(input);
+    try std.testing.expectEqualStrings(expected, res.object.asString().data);
+    try std.testing.expect(vm.objects != null);
+    // try std.testing.expectEqual(null, vm.objects.?.next);
 }

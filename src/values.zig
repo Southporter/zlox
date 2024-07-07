@@ -47,7 +47,7 @@ pub const Value = union(ValueTag) {
             .nil => true,
             .boolean => |val| val == b.boolean,
             .number => |val| val == b.number,
-            .object => |obj| obj.equal(b.object),
+            .object => |obj| obj == b.object,
         };
     }
 };

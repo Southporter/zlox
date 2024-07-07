@@ -34,7 +34,8 @@ pub fn runFile(filename: []const u8, allocator: std.mem.Allocator) !void {
 
 test {
     _ = @import("Chunk.zig");
-    _ = @import("VM.zig");
     _ = @import("debug.zig");
     _ = @import("Compiler.zig");
+    _ = @import("Table.zig");
+    _ = @import("VM.zig");
 }

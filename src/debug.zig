@@ -32,7 +32,12 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
 
     return switch (@as(Chunk.Opcode, @enumFromInt(chunk.code[offset]))) {
         .@"return" => simpleInstruction("OP_RETURN", offset, writer),
-        .constant => constantInstruction(chunk, offset, writer),
+        .constant => constantInstruction("OP_CONSTANT", chunk, offset, writer),
+        .define_global => constantInstruction("OP_DEFINE_GLOBAL", chunk, offset, writer),
+        .get_global => constantInstruction("OP_GET_GLOBAL", chunk, offset, writer),
+        .set_global => constantInstruction("OP_SET_GLOBAL", chunk, offset, writer),
+        .print => simpleInstruction("OP_PRINT", offset, writer),
+        .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
         .nil => simpleInstruction("OP_NIL", offset, writer),
@@ -53,10 +58,10 @@ fn simpleInstruction(name: []const u8, offset: usize, writer: anytype) !usize {
     return offset + 1;
 }
 
-fn constantInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
+fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: anytype) !usize {
     const index = chunk.code[offset + 1];
     const constant = chunk.constants.items[index];
-    try writer.print("{s:<16} {d:>4} ", .{ "OP_CONSTANT", index });
+    try writer.print("{s:<16} {d:>4} ", .{ name, index });
     switch (constant) {
         .number => |val| try writer.print("{any}\n", .{val}),
         .boolean => |val| try writer.print("{}\n", .{val}),
@@ -88,6 +93,9 @@ test "Simple dissassembly" {
     try chunk.writeOp(.equal, 125);
     try chunk.writeOp(.greater, 125);
     try chunk.writeOp(.less, 125);
+    try chunk.writeOp(.define_global, 126);
+    const answer_index = try chunk.addConstant(.{ .number = 42 });
+    try chunk.write(answer_index, 126);
 
     var buf: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -110,6 +118,7 @@ test "Simple dissassembly" {
         \\0011    | OP_EQUAL
         \\0012    | OP_GREATER
         \\0013    | OP_LESS
+        \\0014  126 OP_DEFINE_GLOBAL    1 4.2e1
         \\
     ;
     try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);

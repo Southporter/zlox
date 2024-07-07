@@ -1,66 +1,17 @@
 const std = @import("std");
 const Compiler = @This();
-const Scanner = @import("Scanner.zig");
 const Chunk = @import("Chunk.zig");
+const Parser = @import("Parser.zig");
+const Scanner = @import("Scanner.zig");
 const values = @import("values.zig");
 const Object = @import("Object.zig");
+const StringPool = @import("StringPool.zig");
+
+const log = std.log.scoped(.compiler);
 
 parser: Parser,
 chunk: *Chunk = undefined,
-
-const Parser = struct {
-    scanner: Scanner,
-    previous: ?Scanner.Token = null,
-    current: ?Scanner.Token = null,
-    had_error: bool = false,
-    panic_mode: bool = false,
-
-    const log = std.log.scoped(.parser);
-
-    pub fn advance(parser: *Parser) void {
-        parser.previous = parser.current;
-
-        while (true) {
-            parser.current = parser.scanner.next();
-            if (parser.current.?.tag != .@"error") break;
-            parser.errorAtCurrent(parser.current.?.raw);
-        }
-    }
-
-    pub fn consume(parser: *Parser, tag: Scanner.TokenType, message: []const u8) void {
-        if (parser.current.?.tag == tag) {
-            parser.advance();
-            return;
-        }
-
-        parser.errorAtCurrent(message);
-    }
-
-    fn errorAtCurrent(parser: *Parser, message: []const u8) void {
-        parser.errorAt(parser.current.?, message);
-    }
-
-    fn errorAt(parser: *Parser, token: Scanner.Token, message: []const u8) void {
-        if (parser.panic_mode) return;
-        parser.panic_mode = true;
-
-        log.err("[line {d}] Error", .{token.line});
-        if (token.tag == .eof) {
-            log.err(" at end", .{});
-        } else if (token.tag == .@"error") {
-            // Nothing.
-        } else {
-            log.err(" at '{s}'", .{token.raw});
-        }
-
-        log.err(": {s}\n", .{message});
-        parser.had_error = true;
-    }
-
-    fn err(parser: *Parser, message: []const u8) void {
-        parser.errorAt(parser.previous.?, message);
-    }
-};
+string_pool: *StringPool,
 
 const Precedence = enum {
     none,
@@ -94,11 +45,15 @@ const Precedence = enum {
     fn greater(current: Precedence, next: Precedence) bool {
         return @intFromEnum(current) > @intFromEnum(next);
     }
+
+    fn lessOrEqual(current: Precedence, next: Precedence) bool {
+        return @intFromEnum(current) <= @intFromEnum(next);
+    }
 };
 
 pub const CompileError = error{ConstantOverflow} || std.mem.Allocator.Error || std.fmt.ParseFloatError;
 
-const ParseFn = *const fn (*Compiler) CompileError!void;
+const ParseFn = *const fn (*Compiler, bool) CompileError!void;
 
 const ParseRule = struct {
     prefix: ?ParseFn = null,
@@ -135,6 +90,9 @@ const rules = blk: {
     map.set(.string, ParseRule{
         .prefix = string,
         .precedence = .primary,
+    });
+    map.set(.identifier, ParseRule{
+        .prefix = variable,
     });
     map.set(.true, ParseRule{
         .prefix = literal,
@@ -182,9 +140,12 @@ fn getRule(tag: Scanner.TokenType) ParseRule {
 
 fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!void {
     compiler.parser.advance();
+    const can_assign = precedence.lessOrEqual(.assignment);
+    log.debug("(compiler) Can assign? {} assignment > {s}\n", .{ can_assign, @tagName(precedence) });
     const prefix_fn = getRule(compiler.parser.previous.?.tag).prefix;
+    log.debug("(compiler) Parsing prefix: {s} = {any}\n", .{ @tagName(compiler.parser.previous.?.tag), prefix_fn });
     if (prefix_fn) |prefix| {
-        try prefix(compiler);
+        try prefix(compiler, can_assign);
     } else {
         compiler.parser.err("Expect expression.");
         return;
@@ -193,8 +154,11 @@ fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!voi
     while (getRule(compiler.parser.current.?.tag).precedence.greater(precedence)) {
         compiler.parser.advance();
         const infix_fn = getRule(compiler.parser.previous.?.tag).infix;
+        log.debug("(compiler) Parsing infix: {s} = {any}\n", .{ @tagName(compiler.parser.previous.?.tag), infix_fn });
         if (infix_fn) |infix| {
-            try infix(compiler);
+            try infix(compiler, can_assign);
+        } else if (can_assign and compiler.parser.match(.equal)) {
+            compiler.parser.err("Invalid assignment target.");
         } else {
             compiler.parser.err("Expected infix.");
         }
@@ -211,8 +175,13 @@ pub fn compile(compiler: *Compiler, source: []const u8, chunk: *Chunk) !bool {
         .scanner = Scanner{ .source = source },
     };
     compiler.parser.advance();
-    try compiler.expression();
-    compiler.parser.consume(.eof, "Expected end of expression");
+
+    while (!compiler.parser.match(.eof)) {
+        try compiler.declaration();
+
+        if (compiler.parser.panic_mode) compiler.parser.synchronize();
+    }
+
     try compiler.endCompilation();
     return !compiler.parser.had_error;
 }
@@ -253,25 +222,121 @@ fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
     return index;
 }
 
+fn declaration(compiler: *Compiler) CompileError!void {
+    if (compiler.parser.match(.@"var")) {
+        log.debug("Parsing a var declaration\n", .{});
+        try compiler.varDeclaration();
+    } else {
+        try compiler.statement();
+    }
+}
+
+fn varDeclaration(compiler: *Compiler) CompileError!void {
+    const global = try compiler.parseVariable("Expect variable name.");
+
+    if (compiler.parser.match(.equal)) {
+        try compiler.expression();
+    } else {
+        try compiler.emitOp(.nil);
+    }
+    compiler.parser.consume(.semicolon, "Expect ';' after variable declaration");
+    try compiler.defineVariable(global);
+}
+
+fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
+    compiler.parser.consume(.identifier, msg);
+    return compiler.identifierConstant();
+}
+
+fn identifierConstant(compiler: *Compiler) CompileError!u8 {
+    return compiler.makeConstant(.{ .object = try compiler.copyIdentifier() });
+}
+
+fn defineVariable(compiler: *Compiler, index: u8) CompileError!void {
+    return compiler.emitOpAndArg(.define_global, index);
+}
+
+fn namedVariable(compiler: *Compiler, can_assign: bool) CompileError!void {
+    const arg = try compiler.identifierConstant();
+
+    if (can_assign and compiler.parser.match(.equal)) {
+        try compiler.expression();
+        try compiler.emitOpAndArg(.set_global, arg);
+    } else {
+        try compiler.emitOpAndArg(.get_global, arg);
+    }
+}
+
+fn statement(compiler: *Compiler) CompileError!void {
+    if (compiler.parser.match(.print)) {
+        try compiler.printStatement();
+    } else if (compiler.parser.match(.@"return")) {
+        try compiler.returnStatement();
+    } else {
+        try compiler.expressionStatement();
+    }
+}
+
+fn printStatement(compiler: *Compiler) CompileError!void {
+    try compiler.expression();
+    compiler.parser.consume(.semicolon, "Expect ';' after value.");
+    return compiler.emitOp(.print);
+}
+
+fn returnStatement(compiler: *Compiler) CompileError!void {
+    try compiler.expression();
+    compiler.parser.consume(.semicolon, "Expect ';' after value.");
+    return compiler.emitOp(.@"return");
+}
+
+fn expressionStatement(compiler: *Compiler) CompileError!void {
+    try compiler.expression();
+    compiler.parser.consume(.semicolon, "Expect ';' after expression.");
+    return compiler.emitOp(.pop);
+}
+
 fn expression(compiler: *Compiler) CompileError!void {
     try compiler.parsePrecedence(.assignment);
 }
 
-fn number(compiler: *Compiler) CompileError!void {
+fn number(compiler: *Compiler, _: bool) CompileError!void {
     const val = try std.fmt.parseFloat(f64, compiler.parser.previous.?.raw);
     try compiler.emitConstant(.{ .number = val });
 }
 
-fn string(compiler: *Compiler) CompileError!void {
+fn string(compiler: *Compiler, _: bool) CompileError!void {
     try compiler.emitConstant(.{ .object = try compiler.copyString() });
+}
+
+fn variable(compiler: *Compiler, can_assign: bool) CompileError!void {
+    log.debug("Parsing variable identifier: can assign? {}\n", .{can_assign});
+    try compiler.namedVariable(can_assign);
 }
 
 fn copyString(compiler: *Compiler) !*Object {
     const original = compiler.parser.previous.?.raw;
-    return try Object.String.copy(original[1 .. original.len - 1], compiler.currentChunk().allocator());
+    const interned = compiler.string_pool.find(original[1 .. original.len - 1]);
+    if (interned) |i| {
+        return &i.object;
+    }
+    const res = try Object.String.copy(original[1 .. original.len - 1], compiler.currentChunk().allocator());
+    try compiler.string_pool.set(res.asString(), values.NIL_VAL);
+    return res;
 }
 
-fn literal(compiler: *Compiler) CompileError!void {
+fn copyIdentifier(compiler: *Compiler) !*Object {
+    const original = compiler.parser.previous.?.raw;
+    log.debug("Copying identifier: {s}\n", .{original});
+    const interned = compiler.string_pool.find(original);
+    if (interned) |i| {
+        return &i.object;
+    }
+    const res = try Object.String.copy(original, compiler.currentChunk().allocator());
+    try compiler.string_pool.set(res.asString(), values.NIL_VAL);
+    return res;
+}
+
+fn literal(compiler: *Compiler, _: bool) CompileError!void {
     return switch (compiler.parser.previous.?.tag) {
         .false => compiler.emitOp(.false),
         .true => compiler.emitOp(.true),
@@ -280,12 +345,12 @@ fn literal(compiler: *Compiler) CompileError!void {
     };
 }
 
-fn grouping(compiler: *Compiler) CompileError!void {
+fn grouping(compiler: *Compiler, _: bool) CompileError!void {
     try compiler.expression();
     compiler.parser.consume(.right_paren, "Expect ')' after expression.");
 }
 
-fn unary(compiler: *Compiler) CompileError!void {
+fn unary(compiler: *Compiler, _: bool) CompileError!void {
     const tag = compiler.parser.previous.?.tag;
     try compiler.parsePrecedence(.unary);
     switch (tag) {
@@ -295,7 +360,7 @@ fn unary(compiler: *Compiler) CompileError!void {
     }
 }
 
-fn binary(compiler: *Compiler) CompileError!void {
+fn binary(compiler: *Compiler, _: bool) CompileError!void {
     const tag = compiler.parser.previous.?.tag;
 
     const rule = getRule(tag);
@@ -362,7 +427,7 @@ test "Basic compilation" {
 
 test "Chunk compilation" {
     const source =
-        \\1 + 2 * 3 / 4
+        \\1 + 2 * 3 / 4;
         \\
     ;
 
@@ -382,6 +447,7 @@ test "Chunk compilation" {
         @intFromEnum(Chunk.Opcode.multiply),
         @intFromEnum(Chunk.Opcode.constant), 3,
         @intFromEnum(Chunk.Opcode.divide),
+        @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, chunk.code[0..chunk.count]);
@@ -389,7 +455,7 @@ test "Chunk compilation" {
 }
 test "Chapter 17 Challenge 1" {
     const source =
-        \\(-1 + 2) * 3 - -4
+        \\(-1 + 2) * 3 - -4;
         \\
     ;
 
@@ -411,8 +477,51 @@ test "Chapter 17 Challenge 1" {
         @intFromEnum(Chunk.Opcode.constant), 3,
         @intFromEnum(Chunk.Opcode.negate),
         @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, chunk.code[0..chunk.count]);
     try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, chunk.constants.items);
+}
+
+test "Chapter 21: Globals" {
+    const source =
+        \\ var breakfast = "beignets";
+        \\ var beverage = "cafe au lait";
+        \\ breakfast = "beignets with " + beverage;
+        \\
+        \\ return breakfast;
+        \\
+    ;
+
+    var chunk = try Chunk.init(std.testing.allocator);
+    defer chunk.deinit();
+
+    var compiler: Compiler = undefined;
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+    compiler.string_pool = &pool;
+
+    const success = try compiler.compile(source, &chunk);
+    try std.testing.expectEqual(true, success);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.constant), 3,
+        @intFromEnum(Chunk.Opcode.define_global), 2,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.get_global), 6,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.set_global), 4,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.get_global), 7,
+        @intFromEnum(Chunk.Opcode.@"return"),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, chunk.code[0..chunk.count]);
+    try std.testing.expectEqualStrings("breakfast", chunk.constants.items[0].object.asString().data);
+    try std.testing.expectEqualStrings("beignets", chunk.constants.items[1].object.asString().data);
+    try std.testing.expectEqualStrings("beverage", chunk.constants.items[2].object.asString().data);
+    try std.testing.expectEqualStrings("cafe au lait", chunk.constants.items[3].object.asString().data);
 }
