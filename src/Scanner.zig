@@ -65,6 +65,11 @@ pub const Token = struct {
     line: usize,
     tag: TokenType,
     raw: []const u8,
+
+    pub fn equal(a: *const Token, b: Token) bool {
+        if (a.raw.len != b.raw.len) return false;
+        return std.mem.eql(u8, a.raw, b.raw);
+    }
 };
 fn makeToken(scanner: *Scanner, tag: TokenType) Token {
     return .{

@@ -9,9 +9,23 @@ const StringPool = @import("StringPool.zig");
 
 const log = std.log.scoped(.compiler);
 
-parser: Parser,
+const MAX_LOCALS = std.math.maxInt(u8) + 1;
+
+const Local = struct {
+    name: Scanner.Token,
+    depth: isize,
+};
+
+parser: Parser = undefined,
 chunk: *Chunk = undefined,
 string_pool: *StringPool,
+locals: [MAX_LOCALS]Local = [_]Local{Local{ .name = Scanner.Token{ .line = 0, .raw = "", .tag = .@"error" }, .depth = -1 }} ** MAX_LOCALS,
+local_count: usize = 0,
+scope_depth: isize = 0,
+
+pub fn deinit(compiler: *Compiler) void {
+    compiler.string_pool.deinit();
+}
 
 const Precedence = enum {
     none,
@@ -245,6 +259,9 @@ fn varDeclaration(compiler: *Compiler) CompileError!void {
 
 fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
     compiler.parser.consume(.identifier, msg);
+
+    compiler.declareVariable();
+    if (compiler.scope_depth > 0) return 0;
     return compiler.identifierConstant();
 }
 
@@ -253,23 +270,101 @@ fn identifierConstant(compiler: *Compiler) CompileError!u8 {
 }
 
 fn defineVariable(compiler: *Compiler, index: u8) CompileError!void {
+    if (compiler.scope_depth > 0) {
+        compiler.markInitialized();
+        return;
+    }
     return compiler.emitOpAndArg(.define_global, index);
 }
 
+fn markInitialized(compiler: *Compiler) void {
+    compiler.locals[compiler.local_count - 1].depth = compiler.scope_depth;
+}
+
+fn declareVariable(compiler: *Compiler) void {
+    if (compiler.scope_depth == 0) return;
+
+    const name = compiler.parser.previous.?;
+    for (compiler.locals[0..compiler.local_count]) |local| {
+        std.debug.print("Checking local {any}: {any}\n", .{ name, local });
+        if (local.depth < compiler.scope_depth) {
+            break;
+        }
+
+        if (name.equal(local.name)) {
+            compiler.parser.err("Already a variable with this name in this scope.");
+        }
+    }
+    compiler.addLocal(name);
+}
+
+fn addLocal(compiler: *Compiler, name: Scanner.Token) void {
+    if (compiler.local_count == MAX_LOCALS) {
+        compiler.parser.err("TOO many local variables in function.");
+        return;
+    }
+    defer compiler.local_count += 1;
+    compiler.locals[compiler.local_count] = .{
+        .name = name,
+        .depth = -1,
+    };
+}
+
+fn resolveLocal(compiler: *Compiler) isize {
+    const name = compiler.parser.previous.?;
+    if (compiler.local_count == 0) {
+        return -1;
+    }
+    var i = compiler.local_count - 1;
+    while (i >= 0) : (i -= 1) {
+        const local = compiler.locals[i];
+        if (local.name.equal(name)) {
+            if (local.depth == -1) {
+                compiler.parser.err("Can't read local variable in its own initializer.");
+            }
+            return @intCast(i);
+        }
+    }
+    return -1;
+}
+
 fn namedVariable(compiler: *Compiler, can_assign: bool) CompileError!void {
-    const arg = try compiler.identifierConstant();
+    var getOp = Chunk.Opcode.get_global;
+    var setOp = Chunk.Opcode.set_global;
+    var arg = compiler.resolveLocal();
+    if (arg != -1) {
+        setOp = .set_local;
+        getOp = .get_local;
+    } else {
+        arg = try compiler.identifierConstant();
+    }
 
     if (can_assign and compiler.parser.match(.equal)) {
         try compiler.expression();
-        try compiler.emitOpAndArg(.set_global, arg);
+        try compiler.emitOpAndArg(setOp, @intCast(arg));
     } else {
-        try compiler.emitOpAndArg(.get_global, arg);
+        try compiler.emitOpAndArg(getOp, @intCast(arg));
+    }
+}
+
+inline fn beginScope(compiler: *Compiler) void {
+    compiler.scope_depth += 1;
+}
+fn endScope(compiler: *Compiler) CompileError!void {
+    compiler.scope_depth -= 1;
+
+    while (compiler.local_count > 0 and compiler.locals[compiler.local_count - 1].depth > compiler.scope_depth) : (compiler.local_count -= 1) {
+        try compiler.emitOp(.pop);
     }
 }
 
 fn statement(compiler: *Compiler) CompileError!void {
     if (compiler.parser.match(.print)) {
         try compiler.printStatement();
+    } else if (compiler.parser.match(.left_brace)) {
+        compiler.beginScope();
+        try compiler.block();
+        try compiler.endScope();
     } else if (compiler.parser.match(.@"return")) {
         try compiler.returnStatement();
     } else {
@@ -281,6 +376,14 @@ fn printStatement(compiler: *Compiler) CompileError!void {
     try compiler.expression();
     compiler.parser.consume(.semicolon, "Expect ';' after value.");
     return compiler.emitOp(.print);
+}
+
+fn block(compiler: *Compiler) CompileError!void {
+    while (!(compiler.parser.check(.right_brace) or compiler.parser.check(.eof))) {
+        try compiler.declaration();
+    }
+
+    compiler.parser.consume(.right_brace, "Expected '}' after block.");
 }
 
 fn returnStatement(compiler: *Compiler) CompileError!void {
@@ -496,11 +599,12 @@ test "Chapter 21: Globals" {
 
     var chunk = try Chunk.init(std.testing.allocator);
     defer chunk.deinit();
-
-    var compiler: Compiler = undefined;
     var pool = StringPool.init(std.testing.allocator);
     defer pool.deinit();
-    compiler.string_pool = &pool;
+
+    var compiler = Compiler{
+        .string_pool = &pool,
+};
 
     const success = try compiler.compile(source, &chunk);
     try std.testing.expectEqual(true, success);
@@ -524,4 +628,84 @@ test "Chapter 21: Globals" {
     try std.testing.expectEqualStrings("beignets", chunk.constants.items[1].object.asString().data);
     try std.testing.expectEqualStrings("beverage", chunk.constants.items[2].object.asString().data);
     try std.testing.expectEqualStrings("cafe au lait", chunk.constants.items[3].object.asString().data);
+}
+
+test "Chapter 22: Conflicting locals" {
+    const source =
+        \\ {
+        \\ var a = "test";
+        \\ var a = "another";
+        \\ }
+        ;
+    var chunk = try Chunk.init(std.testing.allocator);
+    defer chunk.deinit();
+
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler: Compiler = .{
+        .string_pool =  &pool,
+    };
+
+    const result = try compiler.compile(source, &chunk);
+    try std.testing.expectEqual(false, result);
+}
+
+test "Chapter 22: Shadow access" {
+    const source =
+        \\ {
+        \\ var a = "test";
+        \\ {
+        \\
+        \\ var a = a;
+        \\ }
+        \\ }
+        ;
+    var chunk = try Chunk.init(std.testing.allocator);
+    defer chunk.deinit();
+
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler: Compiler = .{
+        .string_pool =  &pool,
+    };
+
+    const result = try compiler.compile(source, &chunk);
+    try std.testing.expectEqual(false, result);
+}
+
+test "Chapter 22: variables" {
+    const source =
+        \\ {
+        \\ var a = "test";
+        \\ a = a + " is successful";
+        \\ }
+        ;
+    var chunk = try Chunk.init(std.testing.allocator);
+    defer chunk.deinit();
+
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler: Compiler = .{
+        .string_pool =  &pool,
+    };
+
+    const result = try compiler.compile(source, &chunk);
+    try std.testing.expectEqual(true, result);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.get_local), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.set_local), 0,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, chunk.code[0..chunk.count]);
+    try std.testing.expectEqualStrings("test", chunk.constants.items[0].object.asString().data);
+    try std.testing.expectEqualStrings(" is successful", chunk.constants.items[1].object.asString().data);
 }

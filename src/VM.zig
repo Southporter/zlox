@@ -46,8 +46,9 @@ pub fn deinit(vm: *VM) void {
 pub const Error = error{ CompileError, RuntimeError } || std.mem.Allocator.Error;
 
 pub fn interpret(vm: *VM, input: []const u8) Error!Value {
-    var compiler: Compiler = undefined;
-    compiler.string_pool = &vm.strings;
+    var compiler: Compiler = Compiler{
+        .string_pool = &vm.strings,
+    };
     var chunk = try Chunk.init(vm.allocator);
     defer chunk.deinit();
     const success = compiler.compile(input, &chunk) catch return error.CompileError;
@@ -101,6 +102,14 @@ fn run(vm: *VM) Error!Value {
                     vm.runtimeError("Undefined variable '{s}'.", .{name.data});
                     return error.RuntimeError;
                 }
+            },
+            .get_local => {
+                const slot = vm.readByte();
+                vm.push(vm.stack[slot]);
+            },
+            .set_local => {
+                const slot = vm.readByte();
+                vm.stack[slot] = vm.peek(0);
             },
             .print => {
                 values.print(vm.pop(), log.info);
@@ -175,10 +184,13 @@ fn peek(vm: *VM, distance: usize) Value {
 fn get(vm: *VM, distance: usize) *Value {
     return &vm.stack[vm.stackTop - 1 - distance];
 }
+fn readByte(vm: *VM) u8 {
+    vm.ip += 1;
+    return vm.chunk.code[vm.ip];
+}
 
 fn getConstant(vm: *VM) Value {
-    vm.ip += 1;
-    const index = vm.chunk.code[vm.ip];
+    const index = vm.readByte();
     return vm.chunk.getConstant(index);
 }
 
