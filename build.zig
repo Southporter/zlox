@@ -42,6 +42,17 @@ pub fn build(b: *std.Build) void {
     // step when running `zig build`).
     b.installArtifact(exe);
 
+    const exe_check = b.addExecutable(.{
+        .name = "zlox",
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    exe_check.root_module.addImport("zlox", &lib.root_module);
+
+    const check = b.step("check", "Check if zlox compiles");
+    check.dependOn(&exe_check.step);
+
     // This *creates* a Run step in the build graph, to be executed when another
     // step is evaluated that depends on it. The next line below will establish
     // such a dependency.
