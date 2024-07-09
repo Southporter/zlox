@@ -9,6 +9,8 @@ pub const Opcode = enum(u8) {
     @"return",
     print,
     pop,
+    jump,
+    jump_if_false,
     constant,
     define_global,
     get_global,

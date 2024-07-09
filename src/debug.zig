@@ -39,6 +39,8 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .get_local => byteInstruction("OP_GET_LOCAL", chunk, offset, writer),
         .set_local => byteInstruction("OP_SET_LOCAL", chunk, offset, writer),
         .print => simpleInstruction("OP_PRINT", offset, writer),
+        .jump => jumpInstruction("OP_JUMP", 1, chunk, offset, writer),
+        .jump_if_false => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset, writer),
         .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
@@ -83,6 +85,13 @@ fn byteInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: anyty
     return offset + 2;
 }
 
+fn jumpInstruction(name: []const u8, sign: isize, chunk: *Chunk, offset: usize, writer: anytype) !usize {
+    var jump: u16 = chunk.code[offset + 1] << 8;
+    jump |= chunk.code[offset + 2];
+    try writer.print("{s:<16} {d:>4} -> {d}", name, offset, offset + 3 + sign * jump);
+    return offset + 3;
+}
+
 test "Simple dissassembly" {
     var chunk = try Chunk.init(std.testing.allocator);
     defer chunk.deinit();
@@ -108,6 +117,12 @@ test "Simple dissassembly" {
     try chunk.write(0, 127);
     try chunk.writeOp(.set_local, 127);
     try chunk.write(13, 127);
+    try chunk.writeOp(.jump, 128);
+    try chunk.write(0, 128);
+    try chunk.write(12, 128);
+    try chunk.writeOp(.jump_if_false, 128);
+    try chunk.write(1, 128);
+    try chunk.write(0, 128);
 
     var buf: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -133,6 +148,8 @@ test "Simple dissassembly" {
         \\0014  126 OP_DEFINE_GLOBAL    1 4.2e1
         \\0016  127 OP_GET_LOCAL        0
         \\0018    | OP_SET_LOCAL       13
+        \\0020  128 OP_JUMP            20 -> 12
+        \\0023    | OP_JUMP_IF_FALSE   23 -> 16
         \\
     ;
     try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);

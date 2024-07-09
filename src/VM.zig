@@ -76,6 +76,15 @@ fn run(vm: *VM) Error!Value {
                     return ret;
                 }
             },
+            .jump_if_false => {
+                const offset = vm.readShort();
+                if (vm.peek(0).isFalsey()) vm.ip += offset;
+            },
+            .jump => {
+                const offset = vm.readShort();
+                vm.ip += offset;
+                break;
+            },
             .constant => {
                 vm.push(vm.getConstant());
             },
@@ -187,6 +196,13 @@ fn get(vm: *VM, distance: usize) *Value {
 fn readByte(vm: *VM) u8 {
     vm.ip += 1;
     return vm.chunk.code[vm.ip];
+}
+
+fn readShort(vm: *VM) u16 {
+    defer vm.ip += 2;
+    var val: u16 = vm.chunk.code[vm.ip] << 8;
+    val |= vm.chunk.code[vm.ip + 1];
+    return val;
 }
 
 fn getConstant(vm: *VM) Value {

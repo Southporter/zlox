@@ -219,6 +219,25 @@ fn emitOpOp(compiler: *Compiler, op: Chunk.Opcode, op2: Chunk.Opcode) !void {
     try compiler.emitOp(op2);
 }
 
+fn emitJump(compiler: *Compiler, op: Chunk.Opcode) !void {
+    try compiler.emitOp(op);
+    try compiler.emitByte(0xff);
+    try compiler.emitByte(0xff);
+    return compiler.currentChunk().count - 2;
+}
+
+fn patchJump(compiler: *Compiler, offset: usize) void {
+    var chunk = compiler.currentChunk();
+    const jump = chunk.count - offset - 2;
+
+    if (jump > std.math.maxInt(u16)) {
+        compiler.parser.err("Too much code to jump over");
+    }
+
+    chunk.code[offset] = @truncate(jump >> 8);
+    chunk.code[offset + 1] = @truncate(jump);
+}
+
 fn emitConstant(compiler: *Compiler, constant: values.Value) !void {
     try compiler.emitOpAndArg(.constant, try compiler.makeConstant(constant));
 }
@@ -361,6 +380,8 @@ fn endScope(compiler: *Compiler) CompileError!void {
 fn statement(compiler: *Compiler) CompileError!void {
     if (compiler.parser.match(.print)) {
         try compiler.printStatement();
+    } else if (compiler.parser.match(.@"if")) {
+        try compiler.ifStatement();
     } else if (compiler.parser.match(.left_brace)) {
         compiler.beginScope();
         try compiler.block();
@@ -376,6 +397,25 @@ fn printStatement(compiler: *Compiler) CompileError!void {
     try compiler.expression();
     compiler.parser.consume(.semicolon, "Expect ';' after value.");
     return compiler.emitOp(.print);
+}
+
+fn ifStatement(compiler: *Compiler) CompileError!void {
+    compiler.parser.consume(.left_paren, "Expected '(' after 'if'.");
+    try compiler.expression();
+    compiler.parser.consume(.right_paren, "Expected ')' after 'if'.");
+
+    const thenJump = compiler.emitJump(.jump_if_false);
+    try compiler.emitOp(.pop);
+    try compiler.statement();
+
+    compiler.patchJump(thenJump);
+    try compiler.emitOp(.pop);
+
+    if (compiler.parser.match(.@"else")) {
+        const elseJump = compiler.emitJump(.jump);
+        try compiler.statement();
+        compiler.patchJump(elseJump);
+    }
 }
 
 fn block(compiler: *Compiler) CompileError!void {
