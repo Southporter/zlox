@@ -6,6 +6,7 @@ const Scanner = @import("Scanner.zig");
 const values = @import("values.zig");
 const Object = @import("Object.zig");
 const StringPool = @import("StringPool.zig");
+const debug = @import("debug.zig");
 
 const log = std.log.scoped(.compiler);
 
@@ -16,9 +17,17 @@ const Local = struct {
     depth: isize,
 };
 
+const FunctionType = enum {
+    function,
+    script,
+};
+
 parser: Parser = undefined,
-chunk: *Chunk = undefined,
 string_pool: *StringPool,
+
+function: *Object.Function,
+function_type: FunctionType = .script,
+
 locals: [MAX_LOCALS]Local = [_]Local{Local{ .name = Scanner.Token{ .line = 0, .raw = "", .tag = .@"error" }, .depth = -1 }} ** MAX_LOCALS,
 local_count: usize = 0,
 scope_depth: isize = 0,
@@ -144,6 +153,14 @@ const rules = blk: {
         .infix = binary,
         .precedence = .comparison,
     });
+    map.set(.@"and", ParseRule{
+        .infix = and_,
+        .precedence = .@"and",
+    });
+    map.set(.@"or", ParseRule{
+        .infix = or_,
+        .precedence = .@"or",
+    });
 
     break :blk map;
 };
@@ -180,11 +197,20 @@ fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!voi
 }
 
 fn currentChunk(compiler: *Compiler) *Chunk {
-    return compiler.chunk;
+    return &compiler.function.chunk;
 }
 
-pub fn compile(compiler: *Compiler, source: []const u8, chunk: *Chunk) !bool {
-    compiler.chunk = chunk;
+pub fn init(string_pool: *StringPool, allocator: std.mem.Allocator, function_type: FunctionType) !Compiler {
+    return .{
+        .string_pool = string_pool,
+        .function = try Object.Function.init(allocator),
+        .function_type = function_type,
+        .locals = [1]Local{.{ .name = Scanner.Token{ .tag = .identifier, .raw = "", .line = 0 }, .depth = 0 }} ++ [1]Local{.{ .name = Scanner.Token{ .tag = .@"error", .raw = "", .line = 0 }, .depth = -1 }} ** (MAX_LOCALS - 1),
+        .local_count = 1,
+    };
+}
+
+pub fn compile(compiler: *Compiler, source: []const u8) !*Object.Function {
     compiler.parser = .{
         .scanner = Scanner{ .source = source },
     };
@@ -196,12 +222,23 @@ pub fn compile(compiler: *Compiler, source: []const u8, chunk: *Chunk) !bool {
         if (compiler.parser.panic_mode) compiler.parser.synchronize();
     }
 
-    try compiler.endCompilation();
-    return !compiler.parser.had_error;
+    const function = try compiler.endCompilation();
+    if (compiler.parser.had_error) {
+        return error.ParseError;
+    } else {
+        return function;
+    }
 }
 
-fn endCompilation(compiler: *Compiler) !void {
-    return compiler.emitOp(.@"return");
+fn endCompilation(compiler: *Compiler) !*Object.Function {
+    try compiler.emitOp(.@"return");
+
+    const function = compiler.function;
+
+    if (!compiler.parser.had_error) {
+        _ = debug.disassembleChunk(compiler.currentChunk(), if (function.name) |name| name.data else "<script>", debug.Writer) catch {};
+    }
+    return function;
 }
 
 fn emitOp(compiler: *Compiler, op: Chunk.Opcode) !void {
@@ -219,15 +256,28 @@ fn emitOpOp(compiler: *Compiler, op: Chunk.Opcode, op2: Chunk.Opcode) !void {
     try compiler.emitOp(op2);
 }
 
-fn emitJump(compiler: *Compiler, op: Chunk.Opcode) !void {
+fn emitJump(compiler: *Compiler, op: Chunk.Opcode) !usize {
     try compiler.emitOp(op);
     try compiler.emitByte(0xff);
     try compiler.emitByte(0xff);
     return compiler.currentChunk().count - 2;
 }
 
+fn emitLoop(compiler: *Compiler, start: usize) !void {
+    try compiler.emitOp(.loop);
+
+    const offset = compiler.currentChunk().count - start + 2;
+    if (offset > std.math.maxInt(u16)) {
+        compiler.parser.err("Loop body too large.");
+    }
+
+    try compiler.emitByte(@truncate(offset >> 8));
+    try compiler.emitByte(@truncate(offset));
+}
+
 fn patchJump(compiler: *Compiler, offset: usize) void {
     var chunk = compiler.currentChunk();
+    std.debug.print("Patching with {} - {} - 2\n", .{ chunk.count, offset });
     const jump = chunk.count - offset - 2;
 
     if (jump > std.math.maxInt(u16)) {
@@ -243,6 +293,11 @@ fn emitConstant(compiler: *Compiler, constant: values.Value) !void {
 }
 
 fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
+    for (compiler.currentChunk().constants.items, 0..) |c, i| {
+        if (c.equal(constant)) {
+            return @intCast(i);
+        }
+    }
     const index = compiler.currentChunk().addConstant(constant) catch |e| cth: {
         switch (e) {
             error.ConstantOverflow => {
@@ -305,7 +360,6 @@ fn declareVariable(compiler: *Compiler) void {
 
     const name = compiler.parser.previous.?;
     for (compiler.locals[0..compiler.local_count]) |local| {
-        std.debug.print("Checking local {any}: {any}\n", .{ name, local });
         if (local.depth < compiler.scope_depth) {
             break;
         }
@@ -334,14 +388,14 @@ fn resolveLocal(compiler: *Compiler) isize {
     if (compiler.local_count == 0) {
         return -1;
     }
-    var i = compiler.local_count - 1;
-    while (i >= 0) : (i -= 1) {
-        const local = compiler.locals[i];
+    var i = compiler.local_count;
+    while (i > 0) : (i -= 1) {
+        const local = compiler.locals[i - 1];
         if (local.name.equal(name)) {
             if (local.depth == -1) {
                 compiler.parser.err("Can't read local variable in its own initializer.");
             }
-            return @intCast(i);
+            return @intCast(i - 1);
         }
     }
     return -1;
@@ -382,6 +436,10 @@ fn statement(compiler: *Compiler) CompileError!void {
         try compiler.printStatement();
     } else if (compiler.parser.match(.@"if")) {
         try compiler.ifStatement();
+    } else if (compiler.parser.match(.@"while")) {
+        try compiler.whileStatement();
+    } else if (compiler.parser.match(.@"for")) {
+        try compiler.forStatement();
     } else if (compiler.parser.match(.left_brace)) {
         compiler.beginScope();
         try compiler.block();
@@ -396,7 +454,7 @@ fn statement(compiler: *Compiler) CompileError!void {
 fn printStatement(compiler: *Compiler) CompileError!void {
     try compiler.expression();
     compiler.parser.consume(.semicolon, "Expect ';' after value.");
-    return compiler.emitOp(.print);
+    try compiler.emitOp(.print);
 }
 
 fn ifStatement(compiler: *Compiler) CompileError!void {
@@ -404,18 +462,74 @@ fn ifStatement(compiler: *Compiler) CompileError!void {
     try compiler.expression();
     compiler.parser.consume(.right_paren, "Expected ')' after 'if'.");
 
-    const thenJump = compiler.emitJump(.jump_if_false);
+    const then_jump = try compiler.emitJump(.jump_if_false);
     try compiler.emitOp(.pop);
     try compiler.statement();
 
-    compiler.patchJump(thenJump);
+    const else_jump = try compiler.emitJump(.jump);
+    compiler.patchJump(then_jump);
     try compiler.emitOp(.pop);
 
-    if (compiler.parser.match(.@"else")) {
-        const elseJump = compiler.emitJump(.jump);
-        try compiler.statement();
-        compiler.patchJump(elseJump);
+    if (compiler.parser.match(.@"else")) try compiler.statement();
+    compiler.patchJump(else_jump);
+}
+
+fn whileStatement(compiler: *Compiler) CompileError!void {
+    const loop_start = compiler.currentChunk().count;
+    compiler.parser.consume(.left_paren, "Expected '(' after 'while'.");
+    try compiler.expression();
+    compiler.parser.consume(.right_paren, "Expected ')' after while clause.");
+
+    const exit_jump = try compiler.emitJump(.jump_if_false);
+    try compiler.emitOp(.pop);
+    try compiler.statement();
+    try compiler.emitLoop(loop_start);
+    compiler.patchJump(exit_jump);
+    try compiler.emitOp(.pop);
+}
+fn forStatement(compiler: *Compiler) CompileError!void {
+    compiler.beginScope();
+    compiler.parser.consume(.left_paren, "Expected '(' after 'for'.");
+    if (compiler.parser.match(.semicolon)) {
+        // No initializer
+    } else if (compiler.parser.match(.@"var")) {
+        try compiler.varDeclaration();
+    } else {
+        try compiler.expressionStatement();
     }
+    var loop_start = compiler.currentChunk().count;
+    var exit_jump: usize = std.math.maxInt(usize);
+
+    if (!compiler.parser.match(.semicolon)) {
+        // Condition clause
+        try compiler.expression();
+        compiler.parser.consume(.semicolon, "Expected ';'.");
+
+        exit_jump = try compiler.emitJump(.jump_if_false);
+        try compiler.emitOp(.pop);
+    }
+
+    if (!compiler.parser.match(.semicolon)) {
+        // Increment clause
+        const body_jump = try compiler.emitJump(.jump);
+        const increment_start = compiler.currentChunk().count;
+        try compiler.expression();
+        try compiler.emitOp(.pop);
+        compiler.parser.consume(.right_paren, "Expected ')' after for clause.");
+
+        try compiler.emitLoop(loop_start);
+        loop_start = increment_start;
+        compiler.patchJump(body_jump);
+    }
+
+    try compiler.statement();
+    try compiler.emitLoop(loop_start);
+
+    if (exit_jump != std.math.maxInt(usize)) {
+        compiler.patchJump(exit_jump);
+        try compiler.emitOp(.pop);
+    }
+    try compiler.endScope();
 }
 
 fn block(compiler: *Compiler) CompileError!void {
@@ -469,8 +583,8 @@ fn copyString(compiler: *Compiler) !*Object {
 
 fn copyIdentifier(compiler: *Compiler) !*Object {
     const original = compiler.parser.previous.?.raw;
-    log.debug("Copying identifier: {s}\n", .{original});
     const interned = compiler.string_pool.find(original);
+    log.debug("Copying identifier: {s} -> {}?\n", .{ original, interned != null });
     if (interned) |i| {
         return &i.object;
     }
@@ -521,6 +635,25 @@ fn binary(compiler: *Compiler, _: bool) CompileError!void {
         .less_equal => try compiler.emitOpOp(.greater, .not),
         else => unreachable,
     }
+}
+
+fn and_(compiler: *Compiler, _: bool) CompileError!void {
+    const end_jump = try compiler.emitJump(.jump_if_false);
+    try compiler.emitOp(.pop);
+    try compiler.parsePrecedence(.@"and");
+
+    compiler.patchJump(end_jump);
+}
+
+fn or_(compiler: *Compiler, _: bool) CompileError!void {
+    const else_jump = try compiler.emitJump(.jump_if_false);
+    const end_jump = try compiler.emitJump(.jump);
+
+    compiler.patchJump(else_jump);
+    try compiler.emitOp(.pop);
+
+    try compiler.parsePrecedence(.@"or");
+    compiler.patchJump(end_jump);
 }
 
 pub fn compileAndDump(compiler: *Compiler, source: []const u8, writer: anytype) !void {
@@ -574,12 +707,10 @@ test "Chunk compilation" {
         \\
     ;
 
-    var chunk = try Chunk.init(std.testing.allocator);
-    defer chunk.deinit();
-
     var compiler: Compiler = undefined;
-    const success = try compiler.compile(source, &chunk);
-    try std.testing.expectEqual(true, success);
+    compiler.function = try Object.Function.init(std.testing.allocator);
+    defer compiler.function.object.deinit(std.testing.allocator);
+    const func = try compiler.compile(source);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
@@ -593,8 +724,8 @@ test "Chunk compilation" {
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
-    }, chunk.code[0..chunk.count]);
-    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, chunk.constants.items);
+    }, func.chunk.code[0..func.chunk.count]);
+    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, func.chunk.constants.items);
 }
 test "Chapter 17 Challenge 1" {
     const source =
@@ -602,12 +733,11 @@ test "Chapter 17 Challenge 1" {
         \\
     ;
 
-    var chunk = try Chunk.init(std.testing.allocator);
-    defer chunk.deinit();
 
     var compiler: Compiler = undefined;
-    const success = try compiler.compile(source, &chunk);
-    try std.testing.expectEqual(true, success);
+    compiler.function = try Object.Function.init(std.testing.allocator);
+    defer compiler.function.object.deinit(std.testing.allocator);
+    const func = try compiler.compile(source, );
 
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
@@ -623,12 +753,13 @@ test "Chapter 17 Challenge 1" {
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
-    }, chunk.code[0..chunk.count]);
-    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, chunk.constants.items);
+    }, func.chunk.code[0..func.chunk.count]);
+    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, func.chunk.constants.items);
 }
 
 test "Chapter 21: Globals" {
     const source =
+        \\ var empty;
         \\ var breakfast = "beignets";
         \\ var beverage = "cafe au lait";
         \\ breakfast = "beignets with " + beverage;
@@ -637,82 +768,74 @@ test "Chapter 21: Globals" {
         \\
     ;
 
-    var chunk = try Chunk.init(std.testing.allocator);
-    defer chunk.deinit();
     var pool = StringPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    var compiler = Compiler{
-        .string_pool = &pool,
-};
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
 
-    const success = try compiler.compile(source, &chunk);
-    try std.testing.expectEqual(true, success);
+    const func = try compiler.compile(source);
+    defer func.object.deinit(std.testing.allocator);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
-        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.define_global), 0,
-        @intFromEnum(Chunk.Opcode.constant), 3,
-        @intFromEnum(Chunk.Opcode.define_global), 2,
+        @intFromEnum(Chunk.Opcode.constant), 2,
+        @intFromEnum(Chunk.Opcode.define_global), 1,
+        @intFromEnum(Chunk.Opcode.constant), 4,
+        @intFromEnum(Chunk.Opcode.define_global), 3,
         @intFromEnum(Chunk.Opcode.constant), 5,
-        @intFromEnum(Chunk.Opcode.get_global), 6,
+        @intFromEnum(Chunk.Opcode.get_global), 3,
         @intFromEnum(Chunk.Opcode.add),
-        @intFromEnum(Chunk.Opcode.set_global), 4,
+        @intFromEnum(Chunk.Opcode.set_global), 1,
         @intFromEnum(Chunk.Opcode.pop),
-        @intFromEnum(Chunk.Opcode.get_global), 7,
+        @intFromEnum(Chunk.Opcode.get_global), 1,
         @intFromEnum(Chunk.Opcode.@"return"),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
-    }, chunk.code[0..chunk.count]);
-    try std.testing.expectEqualStrings("breakfast", chunk.constants.items[0].object.asString().data);
-    try std.testing.expectEqualStrings("beignets", chunk.constants.items[1].object.asString().data);
-    try std.testing.expectEqualStrings("beverage", chunk.constants.items[2].object.asString().data);
-    try std.testing.expectEqualStrings("cafe au lait", chunk.constants.items[3].object.asString().data);
+    }, func.chunk.code[0..func.chunk.count]);
+    try std.testing.expectEqualStrings("empty", func.chunk.constants.items[0].object.asString().data);
+    try std.testing.expectEqualStrings("breakfast", func.chunk.constants.items[1].object.asString().data);
+    try std.testing.expectEqualStrings("beignets",func. chunk.constants.items[2].object.asString().data);
+    try std.testing.expectEqualStrings("beverage", func.chunk.constants.items[3].object.asString().data);
+    try std.testing.expectEqualStrings("cafe au lait", func.chunk.constants.items[4].object.asString().data);
 }
 
 test "Chapter 22: Conflicting locals" {
     const source =
         \\ {
-        \\ var a = "test";
-        \\ var a = "another";
+        \\   var a = "test";
+        \\   var a = "another";
         \\ }
         ;
-    var chunk = try Chunk.init(std.testing.allocator);
-    defer chunk.deinit();
 
     var pool = StringPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    var compiler: Compiler = .{
-        .string_pool =  &pool,
-    };
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
 
-    const result = try compiler.compile(source, &chunk);
-    try std.testing.expectEqual(false, result);
+    const res =  compiler.compile(source);
+    try std.testing.expectError(error.ParseError, res);
 }
 
 test "Chapter 22: Shadow access" {
     const source =
         \\ {
-        \\ var a = "test";
-        \\ {
-        \\
-        \\ var a = a;
-        \\ }
+        \\   var a = "test";
+        \\   {
+        \\      var a = a;
+        \\   }
         \\ }
         ;
-    var chunk = try Chunk.init(std.testing.allocator);
-    defer chunk.deinit();
 
     var pool = StringPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    var compiler: Compiler = .{
-        .string_pool =  &pool,
-    };
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
 
-    const result = try compiler.compile(source, &chunk);
-    try std.testing.expectEqual(false, result);
+    const result = compiler.compile(source);
+    try std.testing.expectError(error.ParseError, result);
 }
 
 test "Chapter 22: variables" {
@@ -722,30 +845,184 @@ test "Chapter 22: variables" {
         \\ a = a + " is successful";
         \\ }
         ;
-    var chunk = try Chunk.init(std.testing.allocator);
-    defer chunk.deinit();
 
     var pool = StringPool.init(std.testing.allocator);
     defer pool.deinit();
 
-    var compiler: Compiler = .{
-        .string_pool =  &pool,
-    };
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
 
-    const result = try compiler.compile(source, &chunk);
-    try std.testing.expectEqual(true, result);
+    const func = try compiler.compile(source);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
-        @intFromEnum(Chunk.Opcode.get_local), 0,
+        @intFromEnum(Chunk.Opcode.get_local), 1,
         @intFromEnum(Chunk.Opcode.constant), 1,
         @intFromEnum(Chunk.Opcode.add),
-        @intFromEnum(Chunk.Opcode.set_local), 0,
+        @intFromEnum(Chunk.Opcode.set_local), 1,
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
-    }, chunk.code[0..chunk.count]);
-    try std.testing.expectEqualStrings("test", chunk.constants.items[0].object.asString().data);
-    try std.testing.expectEqualStrings(" is successful", chunk.constants.items[1].object.asString().data);
+    }, func.chunk.code[0..func.chunk.count]);
+    try std.testing.expectEqualStrings("test", func.chunk.constants.items[0].object.asString().data);
+    try std.testing.expectEqualStrings(" is successful", func.chunk.constants.items[1].object.asString().data);
+}
+
+test "Chapter 22: block global access" {
+    const source =
+        \\ var global;
+        \\ {
+        \\     global = "test";
+        \\ }
+        \\ print global;
+        \\
+        ;
+
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
+
+    const func = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.set_global), 0,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, func.chunk.code[0..func.chunk.count]);
+    try std.testing.expectEqualStrings("global", func.chunk.constants.items[0].object.asString().data);
+    try std.testing.expectEqualStrings("test", func.chunk.constants.items[1].object.asString().data);
+}
+
+
+test "Chapter 23: If statements" {
+    const source =
+        \\ if (true) { 1 + 2; }
+        \\ if (false) { 1 + 2; } else { 1 * 2; }
+        \\
+        ;
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
+
+    const func = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.true),
+        @intFromEnum(Chunk.Opcode.jump_if_false), 0, 10,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.jump), 0, 1,
+        @intFromEnum(Chunk.Opcode.pop),
+        // END FIRST IF STATEMENT
+        @intFromEnum(Chunk.Opcode.false),
+        @intFromEnum(Chunk.Opcode.jump_if_false), 0, 10,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.jump), 0, 7,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.multiply),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, func.chunk.code[0..func.chunk.count]);
+    try std.testing.expectEqual(1, func.chunk.constants.items[0].number);
+    try std.testing.expectEqual(2, func.chunk.constants.items[1].number);
+}
+
+test "Chapter 23: while statements" {
+    const source =
+        \\ var i = 0;
+        \\ while (i < 10) {
+        \\    print i;
+        \\    i = i + 1;
+        \\ }
+        \\
+        ;
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
+
+    const func = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        // START WHILE
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.constant), 2,
+        @intFromEnum(Chunk.Opcode.less),
+        @intFromEnum(Chunk.Opcode.jump_if_false), 0, 15,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.constant), 3,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.set_global), 0,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.loop), 0, 0x17,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, func.chunk.code[0..func.chunk.count]);
+}
+
+test "Chapter 23: for statements" {
+    const source =
+        \\ for (var i = 0; i < 10; i = i + 1) {
+        \\     print i;
+        \\ }
+        \\
+        ;
+    var pool = StringPool.init(std.testing.allocator);
+    defer pool.deinit();
+
+    var compiler = try Compiler.init(&pool, std.testing.allocator, .script);
+    defer compiler.function.object.deinit(std.testing.allocator);
+
+    const func = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.get_local), 1,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.less),
+        @intFromEnum(Chunk.Opcode.jump_if_false), 0, 0x15,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.jump), 0, 11,
+        @intFromEnum(Chunk.Opcode.get_local), 1,
+        @intFromEnum(Chunk.Opcode.constant), 2,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.set_local), 1,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.loop), 0, 0x17,
+        @intFromEnum(Chunk.Opcode.get_local), 1,
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.loop), 0, 0x11,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, func.chunk.code[0..func.chunk.count]);
 }

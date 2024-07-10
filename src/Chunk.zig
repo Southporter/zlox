@@ -11,6 +11,7 @@ pub const Opcode = enum(u8) {
     pop,
     jump,
     jump_if_false,
+    loop,
     constant,
     define_global,
     get_global,

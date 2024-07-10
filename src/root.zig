@@ -1,5 +1,7 @@
 const std = @import("std");
 const VM = @import("VM.zig");
+const Compiler = @import("Compiler.zig");
+const Chunk = @import("Chunk.zig");
 const values = @import("values.zig");
 
 const log = std.log.scoped(.root);
@@ -10,14 +12,15 @@ pub fn repl(allocator: std.mem.Allocator) !void {
     var line: [2048]u8 = undefined;
 
     var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var vm = VM.init(arena.allocator());
+    var compiler = try Compiler.init(&vm.strings, arena.allocator(), .script);
     while (true) {
         _ = try out.write("> ");
         const count = try in.read(&line);
-        var vm = VM.init(arena.allocator());
-        const val = vm.interpret(line[0..count]) catch continue;
+        const res = compiler.compile(line[0..count]) catch continue;
+        const val = vm.interpretFunction(res) catch continue;
         values.print(val, log.info);
-        vm.deinit();
-        _ = arena.reset(.retain_capacity);
     }
 }
 

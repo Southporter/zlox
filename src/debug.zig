@@ -41,6 +41,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .print => simpleInstruction("OP_PRINT", offset, writer),
         .jump => jumpInstruction("OP_JUMP", 1, chunk, offset, writer),
         .jump_if_false => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset, writer),
+        .loop => jumpInstruction("OP_LOOP", -1, chunk, offset, writer),
         .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
@@ -72,7 +73,15 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: a
         .nil => _ = try writer.write("nil\n"),
         .object => |obj| {
             switch (obj.tag) {
-                .string => try writer.print("{s}\n", .{obj.asString().data}),
+                .string => try writer.print("\"{s}\"\n", .{obj.asString().data}),
+                .function => {
+                    const fun = obj.asFunction();
+                    if (fun.name) |n| {
+                        try writer.print("<fn {s}\n", .{n.data});
+                    } else {
+                        _ = try writer.write("<script>\n");
+                    }
+                },
             }
         },
     }
@@ -86,9 +95,11 @@ fn byteInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: anyty
 }
 
 fn jumpInstruction(name: []const u8, sign: isize, chunk: *Chunk, offset: usize, writer: anytype) !usize {
-    var jump: u16 = chunk.code[offset + 1] << 8;
+    var jump: u16 = @as(u16, chunk.code[offset + 1]) << 8;
     jump |= chunk.code[offset + 2];
-    try writer.print("{s:<16} {d:>4} -> {d}", name, offset, offset + 3 + sign * jump);
+    var dest: isize = @intCast(offset + 3);
+    dest += sign * jump;
+    try writer.print("{s:<16} {d:>4} -> {d}\n", .{ name, offset, dest });
     return offset + 3;
 }
 
@@ -123,6 +134,9 @@ test "Simple dissassembly" {
     try chunk.writeOp(.jump_if_false, 128);
     try chunk.write(1, 128);
     try chunk.write(0, 128);
+    try chunk.writeOp(.loop, 128);
+    try chunk.write(0, 128);
+    try chunk.write(9, 128);
 
     var buf: [512]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
@@ -148,8 +162,9 @@ test "Simple dissassembly" {
         \\0014  126 OP_DEFINE_GLOBAL    1 4.2e1
         \\0016  127 OP_GET_LOCAL        0
         \\0018    | OP_SET_LOCAL       13
-        \\0020  128 OP_JUMP            20 -> 12
-        \\0023    | OP_JUMP_IF_FALSE   23 -> 16
+        \\0020  128 OP_JUMP            20 -> 35
+        \\0023    | OP_JUMP_IF_FALSE   23 -> 282
+        \\0026    | OP_LOOP            26 -> 20
         \\
     ;
     try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);

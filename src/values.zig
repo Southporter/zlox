@@ -67,6 +67,14 @@ pub fn print(value: Value, printer: Printer) void {
 
 pub fn printObject(object: *Object, printer: Printer) void {
     switch (object.tag) {
-        .string => printer("{s}", .{object.asString().data}),
+        .string => printer("\"{s}\"", .{object.asString().data}),
+        .function => {
+            const fun = object.asFunction();
+            if (fun.name) |name| {
+                printer("<fn {s}>", .{name.data});
+            } else {
+                printer("<script>", .{});
+            }
+        },
     }
 }

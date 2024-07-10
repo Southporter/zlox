@@ -59,16 +59,18 @@ fn errorAt(parser: *Parser, token: Scanner.Token, message: []const u8) void {
     if (parser.panic_mode) return;
     parser.panic_mode = true;
 
-    log.err("[line {d}] Error", .{token.line});
+    const logger = if (@import("builtin").is_test) log.warn else log.err;
+
+    logger("[line {d}] Error", .{token.line});
     if (token.tag == .eof) {
-        log.err(" at end", .{});
+        logger(" at end", .{});
     } else if (token.tag == .@"error") {
         // Nothing.
     } else {
-        log.err(" at '{s}'", .{token.raw});
+        logger(" at '{s}'", .{token.raw});
     }
 
-    log.err(": {s}\n", .{message});
+    logger(": {s}\n", .{message});
     parser.had_error = true;
 }
 
