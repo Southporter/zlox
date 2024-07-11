@@ -22,6 +22,7 @@ const FunctionType = enum {
     script,
 };
 
+allocator: std.mem.Allocator,
 parser: Parser = undefined,
 string_pool: *StringPool,
 
@@ -88,6 +89,8 @@ const rules = blk: {
     var map = std.EnumArray(Scanner.TokenType, ParseRule).initFill(.{});
     map.set(.left_paren, ParseRule{
         .prefix = grouping,
+        .infix = call,
+        .precedence = .call,
     });
     map.set(.minus, ParseRule{
         .prefix = unary,
@@ -207,6 +210,7 @@ pub fn init(string_pool: *StringPool, allocator: std.mem.Allocator, function_typ
         .function_type = function_type,
         .locals = [1]Local{.{ .name = Scanner.Token{ .tag = .identifier, .raw = "", .line = 0 }, .depth = 0 }} ++ [1]Local{.{ .name = Scanner.Token{ .tag = .@"error", .raw = "", .line = 0 }, .depth = -1 }} ** (MAX_LOCALS - 1),
         .local_count = 1,
+        .allocator = allocator,
     };
 }
 
@@ -231,8 +235,7 @@ pub fn compile(compiler: *Compiler, source: []const u8) !*Object.Function {
 }
 
 fn endCompilation(compiler: *Compiler) !*Object.Function {
-    try compiler.emitOp(.@"return");
-
+    try compiler.emitReturn();
     const function = compiler.function;
 
     if (!compiler.parser.had_error) {
@@ -247,13 +250,17 @@ fn emitOp(compiler: *Compiler, op: Chunk.Opcode) !void {
 fn emitByte(compiler: *Compiler, byte: u8) !void {
     try compiler.currentChunk().write(byte, compiler.parser.previous.?.line);
 }
-fn emitOpAndArg(compiler: *Compiler, op: Chunk.Opcode, arg: u8) !void {
+fn emitOpAndArg(compiler: *Compiler, op: Chunk.Opcode, op_arg: u8) !void {
     try compiler.emitOp(op);
-    try compiler.emitByte(arg);
+    try compiler.emitByte(op_arg);
 }
 fn emitOpOp(compiler: *Compiler, op: Chunk.Opcode, op2: Chunk.Opcode) !void {
     try compiler.emitOp(op);
     try compiler.emitOp(op2);
+}
+fn emitReturn(compiler: *Compiler) !void {
+    try compiler.emitOp(.nil);
+    try compiler.emitOp(.@"return");
 }
 
 fn emitJump(compiler: *Compiler, op: Chunk.Opcode) !usize {
@@ -314,6 +321,8 @@ fn declaration(compiler: *Compiler) CompileError!void {
     if (compiler.parser.match(.@"var")) {
         log.debug("Parsing a var declaration\n", .{});
         try compiler.varDeclaration();
+    } else if (compiler.parser.match(.fun)) {
+        try compiler.funDeclaration();
     } else {
         try compiler.statement();
     }
@@ -328,6 +337,13 @@ fn varDeclaration(compiler: *Compiler) CompileError!void {
         try compiler.emitOp(.nil);
     }
     compiler.parser.consume(.semicolon, "Expect ';' after variable declaration");
+    try compiler.defineVariable(global);
+}
+
+fn funDeclaration(compiler: *Compiler) CompileError!void {
+    const global = try compiler.parseVariable("Expect function name.");
+    compiler.markInitialized();
+    try compiler.compileFunction(.function);
     try compiler.defineVariable(global);
 }
 
@@ -352,6 +368,7 @@ fn defineVariable(compiler: *Compiler, index: u8) CompileError!void {
 }
 
 fn markInitialized(compiler: *Compiler) void {
+    if (compiler.scope_depth == 0) return;
     compiler.locals[compiler.local_count - 1].depth = compiler.scope_depth;
 }
 
@@ -404,19 +421,19 @@ fn resolveLocal(compiler: *Compiler) isize {
 fn namedVariable(compiler: *Compiler, can_assign: bool) CompileError!void {
     var getOp = Chunk.Opcode.get_global;
     var setOp = Chunk.Opcode.set_global;
-    var arg = compiler.resolveLocal();
-    if (arg != -1) {
+    var op_arg = compiler.resolveLocal();
+    if (op_arg != -1) {
         setOp = .set_local;
         getOp = .get_local;
     } else {
-        arg = try compiler.identifierConstant();
+        op_arg = try compiler.identifierConstant();
     }
 
     if (can_assign and compiler.parser.match(.equal)) {
         try compiler.expression();
-        try compiler.emitOpAndArg(setOp, @intCast(arg));
+        try compiler.emitOpAndArg(setOp, @intCast(op_arg));
     } else {
-        try compiler.emitOpAndArg(getOp, @intCast(arg));
+        try compiler.emitOpAndArg(getOp, @intCast(op_arg));
     }
 }
 
@@ -541,9 +558,13 @@ fn block(compiler: *Compiler) CompileError!void {
 }
 
 fn returnStatement(compiler: *Compiler) CompileError!void {
-    try compiler.expression();
-    compiler.parser.consume(.semicolon, "Expect ';' after value.");
-    return compiler.emitOp(.@"return");
+    if (compiler.parser.match(.semicolon)) {
+        try compiler.emitReturn();
+    } else {
+        try compiler.expression();
+        compiler.parser.consume(.semicolon, "Expect ';' after value.");
+        return compiler.emitOp(.@"return");
+    }
 }
 
 fn expressionStatement(compiler: *Compiler) CompileError!void {
@@ -568,6 +589,64 @@ fn string(compiler: *Compiler, _: bool) CompileError!void {
 fn variable(compiler: *Compiler, can_assign: bool) CompileError!void {
     log.debug("Parsing variable identifier: can assign? {}\n", .{can_assign});
     try compiler.namedVariable(can_assign);
+}
+
+fn call(compiler: *Compiler, _: bool) CompileError!void {
+    const arg_count = try compiler.argList();
+    try compiler.emitOpAndArg(.call, arg_count);
+}
+
+fn argList(compiler: *Compiler) CompileError!u8 {
+    var arg_count: u8 = 0;
+    if (!compiler.parser.check(.right_paren)) {
+        try compiler.expression();
+        arg_count += 1;
+        while (compiler.parser.match(.comma)) : (arg_count += 1) {
+            try compiler.expression();
+            if (arg_count == 255) {
+                compiler.parser.err("Can't have more than 255 arguments");
+            }
+        }
+    }
+    compiler.parser.consume(.right_paren, "Expected ')' after arguments.");
+    return arg_count;
+}
+
+fn arg(compiler: *Compiler) CompileError!void {
+    compiler.function.arity += 1;
+    if (compiler.function.arity > 255) {
+        compiler.parser.errorAtCurrent("Can't have more than 255 function parameters.");
+    }
+    const constant = try compiler.parseVariable("Expect parameter name.");
+    try compiler.defineVariable(constant);
+}
+
+fn args(compiler: *Compiler) CompileError!void {
+    if (compiler.parser.check(.right_paren)) {
+        return;
+    }
+    try compiler.arg();
+    while (compiler.parser.match(.comma)) {
+        try compiler.arg();
+    }
+}
+
+fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
+    var fun_compiler = try Compiler.init(compiler.string_pool, compiler.allocator, function_type);
+    fun_compiler.function.name = (try compiler.copyIdentifier()).asString();
+    fun_compiler.beginScope();
+    fun_compiler.parser = compiler.parser;
+    fun_compiler.parser.consume(.left_paren, "Expect '(' after function name.");
+
+    try fun_compiler.args();
+
+    fun_compiler.parser.consume(.right_paren, "Expect ')' after function parameters.");
+    fun_compiler.parser.consume(.left_brace, "Expect '{' before function body.");
+    try fun_compiler.block();
+
+    const function = try fun_compiler.endCompilation();
+    compiler.parser = fun_compiler.parser;
+    try compiler.emitConstant(.{ .object = &function.object });
 }
 
 fn copyString(compiler: *Compiler) !*Object {
@@ -722,6 +801,7 @@ test "Chunk compilation" {
         @intFromEnum(Chunk.Opcode.constant), 3,
         @intFromEnum(Chunk.Opcode.divide),
         @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -751,6 +831,7 @@ test "Chapter 17 Challenge 1" {
         @intFromEnum(Chunk.Opcode.negate),
         @intFromEnum(Chunk.Opcode.subtract),
         @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -790,6 +871,7 @@ test "Chapter 21: Globals" {
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.get_global), 1,
         @intFromEnum(Chunk.Opcode.@"return"),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -862,6 +944,7 @@ test "Chapter 22: variables" {
         @intFromEnum(Chunk.Opcode.set_local), 1,
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -895,6 +978,7 @@ test "Chapter 22: block global access" {
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.get_global), 0,
         @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -941,6 +1025,7 @@ test "Chapter 23: If statements" {
         @intFromEnum(Chunk.Opcode.constant), 1,
         @intFromEnum(Chunk.Opcode.multiply),
         @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -983,6 +1068,7 @@ test "Chapter 23: while statements" {
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.loop), 0, 0x17,
         @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
@@ -1022,7 +1108,47 @@ test "Chapter 23: for statements" {
         @intFromEnum(Chunk.Opcode.loop), 0, 0x11,
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
+}
+
+test "Chapter 24: function declaration" {
+    const source =
+        \\ fun main(args) {
+        \\     print args;
+        \\ }
+        \\
+        \\ print main;
+        \\
+        ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var pool = StringPool.init(arena.allocator());
+    var compiler = try Compiler.init(&pool, arena.allocator(), .script);
+
+    const func = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, func.chunk.code[0..func.chunk.count]);
+    const func_decl = func.chunk.constants.items[1].object.asFunction();
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.get_local), 1,
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, func_decl.chunk.code[0..func_decl.chunk.count]);
+
 }

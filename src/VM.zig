@@ -10,31 +10,32 @@ const Value = values.Value;
 const debug = @import("debug.zig");
 const StringPool = @import("StringPool.zig");
 const Table = @import("Table.zig");
+const builtins = @import("builtins.zig");
 
 const STACK_MAX = 256 * FRAMES_MAX;
 const FRAMES_MAX = 64;
 
 stack: [STACK_MAX]Value = undefined,
-stackTop: usize = 0,
-allocator: std.mem.Allocator,
+stack_top: [*]Value = undefined,
+arena: std.heap.ArenaAllocator = undefined,
 objects: ?*Object = null,
-strings: StringPool,
-globals: Table,
-frames: [FRAMES_MAX]CallFrame,
+strings: StringPool = undefined,
+globals: Table = undefined,
+frames: [FRAMES_MAX]CallFrame = undefined,
 frame_count: usize = 0,
 
 const CallFrame = struct {
     function: *Object.Function,
     ip: [*]u8,
-    slots: []Value,
+    slots: [*]Value,
 
     fn readByte(frame: *CallFrame) u8 {
-        frame.ip += 1;
+        defer frame.ip += 1;
         return frame.ip[0];
     }
     fn readShort(frame: *CallFrame) u16 {
-        var val: u16 = @as(u16, frame.ip[1]) << 8;
-        val |= frame.ip[2];
+        var val: u16 = @as(u16, frame.ip[0]) << 8;
+        val |= frame.ip[1];
         frame.ip += 2;
         return val;
     }
@@ -52,72 +53,76 @@ const CallFrame = struct {
         log.debug("\n", .{});
     }
 
-    fn runtimeError(frame: *CallFrame, comptime fmt: []const u8, args: anytype) void {
-        log.err(fmt, args);
-        const line = frame.function.chunk.lines.items[@intFromPtr(frame.ip) - 1 - @intFromPtr(frame.function.chunk.code.ptr)];
-        log.err("[line {d}] in script\n", .{line});
+    fn getName(frame: *CallFrame) []const u8 {
+        if (frame.function.name) |name| {
+            return name.data;
+        }
+        return "script";
     }
 };
 
-pub fn init(allocator: std.mem.Allocator) VM {
-    return .{
-        .allocator = allocator,
-        .strings = StringPool.init(allocator),
-        .globals = Table.init(allocator) catch unreachable,
-        .frames = undefined,
-    };
+pub fn init(vm: *VM, allocator: std.mem.Allocator) void {
+    vm.arena = std.heap.ArenaAllocator.init(allocator);
+    const arena_allocator = vm.arena.allocator();
+    vm.strings = StringPool.init(arena_allocator);
+    vm.globals = Table.init(arena_allocator) catch unreachable;
+    vm.stack_top = vm.stack[0..STACK_MAX].ptr;
+    vm.objects = null;
+    vm.frame_count = 0;
+}
+
+pub fn addNatives(vm: *VM) !void {
+    try vm.defineNative("clock", builtins.clock);
 }
 
 pub fn deinit(vm: *VM) void {
-    vm.stackTop = 0;
+    vm.stack_top = vm.stack[0..STACK_MAX].ptr;
     vm.frame_count = 0;
-    var object = vm.objects;
-    while (object) |obj| {
-        object = obj.next;
-        obj.deinit(vm.allocator);
-    }
-    vm.strings.deinit();
-    vm.globals.deinit();
+    // var object = vm.objects;
+    // while (object) |obj| {
+    //     object = obj.next;
+    //     obj.deinit(vm.arena.allocator());
+    // }
+    // vm.strings.deinit();
+    // vm.globals.deinit();
+    vm.arena.deinit();
 }
 
 pub const Error = error{ CompileError, RuntimeError } || std.mem.Allocator.Error;
 
 pub fn interpret(vm: *VM, input: []const u8) Error!Value {
-    var compiler: Compiler = try Compiler.init(&vm.strings, vm.allocator, .script);
+    var compiler: Compiler = try Compiler.init(&vm.strings, vm.arena.allocator(), .script);
     const func = compiler.compile(input) catch return error.CompileError;
-    defer func.object.deinit(vm.allocator);
-
     return try vm.interpretFunction(func);
 }
 
 pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
     vm.push(.{ .object = &function.object });
-    vm.frames[0] = .{
-        .function = function,
-        .ip = function.chunk.code.ptr,
-        .slots = vm.stack[0..],
-    };
-    vm.frame_count = 1;
+    if (!vm.call(function, 0)) {
+        return error.RuntimeError;
+    }
     return vm.run();
 }
 
 pub fn run(vm: *VM) Error!Value {
-    var frame = vm.frames[vm.frame_count - 1];
-    var ret = values.NIL_VAL;
-    frame.printConstants();
-    while (true) : (frame.ip += 1) {
-        vm.printStack();
+    var frame = &vm.frames[vm.frame_count - 1];
+
+    while (true) {
+        vm.printStack(log.debug);
+        // try debug.disassembleChunk(&frame.function.chunk, frame.getName(), debug.Writer);
         _ = debug.disassembleInstruction(&frame.function.chunk, @intFromPtr(frame.ip) - @intFromPtr(frame.function.chunk.code.ptr), debug.Writer) catch {};
-        const op: Chunk.Opcode = @enumFromInt(frame.ip[0]);
+        const op: Chunk.Opcode = @enumFromInt(frame.readByte());
         switch (op) {
             .@"return" => {
-                if (vm.stackTop > 0) {
-                    std.debug.print("Returning value on top: {any}\n", .{vm.stack[vm.stackTop - 1]});
-                    return vm.pop();
-                } else {
-                    std.debug.print("Returning last value: {any}\n", .{ret});
-                    return ret;
+                const result = vm.pop();
+                vm.frame_count -= 1;
+                if (vm.frame_count == 0) {
+                    // _ = vm.pop();
+                    return result;
                 }
+                vm.stack_top = frame.slots;
+                vm.push(result);
+                frame = &vm.frames[vm.frame_count - 1];
             },
             .jump_if_false => {
                 const offset = frame.readShort();
@@ -131,26 +136,30 @@ pub fn run(vm: *VM) Error!Value {
                 const offset = frame.readShort();
                 frame.ip -= offset;
             },
+            .call => {
+                const arg_count = frame.readByte();
+                if (!vm.callValue(vm.peek(arg_count), arg_count)) {
+                    return error.RuntimeError;
+                }
+                frame = &vm.frames[vm.frame_count - 1];
+            },
             .constant => {
                 vm.push(frame.readConstant());
             },
             .define_global => {
                 const constant = frame.readConstant();
                 const name = constant.object.asString();
-                std.debug.print("Defining global: {s}\n", .{name.data});
                 _ = try vm.globals.set(name, vm.peek(0));
                 _ = vm.pop();
             },
             .get_global => {
                 const name = frame.readConstant().object.asString();
                 const value = vm.globals.get(name);
-                std.debug.print("Got global for {s}: {any}\n", .{ name.data, value });
-                values.print(value.?, std.debug.print);
 
                 if (value) |val| {
                     vm.push(val);
                 } else {
-                    frame.runtimeError("Undefined variable '{s}'.", .{name.data});
+                    vm.runtimeError("Undefined variable '{s}'.", .{name.data});
                     return error.RuntimeError;
                 }
             },
@@ -159,7 +168,7 @@ pub fn run(vm: *VM) Error!Value {
                 const is_new = try vm.globals.set(name, vm.peek(0));
                 if (is_new) {
                     _ = vm.globals.delete(name);
-                    frame.runtimeError("Undefined variable '{s}'.", .{name.data});
+                    vm.runtimeError("Undefined variable '{s}'.", .{name.data});
                     return error.RuntimeError;
                 }
             },
@@ -175,7 +184,7 @@ pub fn run(vm: *VM) Error!Value {
                 values.print(vm.pop(), log.info);
                 log.info("\n", .{});
             },
-            .pop => ret = vm.pop(),
+            .pop => _ = vm.pop(),
             .true => vm.push(values.TRUE_VAL),
             .false => vm.push(values.FALSE_VAL),
             .nil => vm.push(values.NIL_VAL),
@@ -185,7 +194,7 @@ pub fn run(vm: *VM) Error!Value {
                     value.number = -value.number;
                 },
                 .boolean, .nil, .object => {
-                    frame.runtimeError("Operand must be a number.", .{});
+                    vm.runtimeError("Operand must be a number.", .{});
                     return error.RuntimeError;
                 },
             },
@@ -203,13 +212,13 @@ pub fn run(vm: *VM) Error!Value {
                     const a = vm.pop();
                     vm.push(.{ .number = a.number + b.number });
                 } else {
-                    frame.runtimeError("Operands must be two numbers or two strings.", .{});
+                    vm.runtimeError("Operands must be two numbers or two strings.", .{});
                     return error.RuntimeError;
                 }
             },
             .subtract, .multiply, .divide, .less, .greater => {
                 if (!vm.peek(0).isNumber() or !vm.peek(1).isNumber()) {
-                    frame.runtimeError("Operands must be numbers.", .{});
+                    vm.runtimeError("Operands must be numbers.", .{});
                     return error.RuntimeError;
                 }
                 const b = vm.pop();
@@ -229,20 +238,58 @@ pub fn run(vm: *VM) Error!Value {
 }
 
 fn push(vm: *VM, value: Value) void {
-    vm.stack[vm.stackTop] = value;
-    vm.stackTop += 1;
+    vm.stack_top[0] = value;
+    vm.stack_top += 1;
 }
 
 fn pop(vm: *VM) Value {
-    vm.stackTop -= 1;
-    return vm.stack[vm.stackTop];
+    vm.stack_top -= 1;
+    return vm.stack_top[0];
 }
 
 fn peek(vm: *VM, distance: usize) Value {
-    return vm.stack[vm.stackTop - 1 - distance];
+    const value_ptr = vm.stack_top - 1 - distance;
+    return value_ptr[0];
 }
 fn get(vm: *VM, distance: usize) *Value {
-    return &vm.stack[vm.stackTop - 1 - distance];
+    const value_ptr = vm.stack_top - 1 - distance;
+    return &value_ptr[0];
+}
+
+fn callValue(vm: *VM, callee: Value, arg_count: u8) bool {
+    if (std.meta.activeTag(callee) == .object) {
+        switch (callee.object.tag) {
+            .function => return vm.call(callee.object.asFunction(), arg_count),
+            .native => {
+                const native = callee.object.asNative();
+                const args = vm.stack_top - arg_count;
+                const result = native.function(arg_count, args);
+                vm.stack_top -= arg_count + 1;
+                vm.push(result);
+                return true;
+            },
+            else => {},
+        }
+    }
+    vm.runtimeError("Can only call functions and classes.", .{});
+    return false;
+}
+
+fn call(vm: *VM, function: *Object.Function, arg_count: u8) bool {
+    if (arg_count != function.arity) {
+        vm.runtimeError("Expected {d} arguments but got {d}.\n", .{ function.arity, arg_count });
+        return false;
+    }
+    if (vm.frame_count == FRAMES_MAX) {
+        vm.runtimeError("Stack overflow.\n", .{});
+        return false;
+    }
+    var frame = &vm.frames[vm.frame_count];
+    vm.frame_count += 1;
+    frame.function = function;
+    frame.ip = function.chunk.code.ptr;
+    frame.slots = vm.stack_top - 1 - arg_count;
+    return true;
 }
 
 fn concatenate(vm: *VM) !void {
@@ -251,35 +298,65 @@ fn concatenate(vm: *VM) !void {
     const str_a = a.object.asString();
     const str_b = b.object.asString();
 
-    var new_raw = try vm.allocator.alloc(u8, str_a.data.len + str_b.data.len);
+    var allocator = vm.arena.allocator();
+    var new_raw = try allocator.alloc(u8, str_a.data.len + str_b.data.len);
     @memcpy(new_raw[0..str_a.data.len], str_a.data);
     @memcpy(new_raw[str_a.data.len..], str_b.data);
-    if (vm.strings.find(new_raw)) |interned| {
-        vm.push(.{ .object = &interned.object });
-        vm.allocator.free(new_raw);
+
+    vm.push(.{ .object = try vm.copyString(new_raw, allocator) });
+}
+
+fn copyString(vm: *VM, string: []const u8, allocator: std.mem.Allocator) !*Object {
+    if (vm.strings.find(string)) |interned| {
+        allocator.free(string);
+        return &interned.object;
     } else {
-        const str = try Object.String.fromAlloc(new_raw, vm.allocator);
+        const str = try Object.String.fromAlloc(string, allocator);
         try vm.strings.set(str, values.NIL_VAL);
         const obj = &str.object;
         str.object.next = vm.objects;
         vm.objects = obj;
-        vm.push(.{ .object = obj });
+        return obj;
     }
 }
 
-fn printStack(vm: *VM) void {
-    log.debug("          ", .{});
-    var i: usize = 0;
-    while (i < vm.stackTop) : (i += 1) {
-        log.debug("[ ", .{});
-        values.print(vm.stack[i], log.debug);
-        log.debug(" ]", .{});
+fn defineNative(vm: *VM, name: []const u8, func: Object.NativeFn) !void {
+    const allocator = vm.arena.allocator();
+    vm.push(.{ .object = try vm.copyString(name, allocator) });
+    const native = try Object.Native.init(allocator, func);
+    vm.push(.{ .object = &native.object });
+    std.debug.assert(try vm.globals.set(vm.stack[0].object.asString(), vm.stack[1]));
+    _ = vm.pop();
+    _ = vm.pop();
+}
+
+fn runtimeError(vm: *VM, comptime fmt: []const u8, args: anytype) void {
+    log.err(fmt, args);
+
+    var i = vm.frame_count;
+    while (i > 0) : (i -= 1) {
+        const frame = vm.frames[i - 1];
+        const fun = frame.function;
+        const instruction = @intFromPtr(frame.ip) - @intFromPtr(fun.chunk.code.ptr);
+        const name = if (fun.name) |n| n.data else "script";
+        log.err("[line {d}] in {s}()\n", .{ fun.chunk.lines.items[instruction], name });
     }
-    log.debug("\n", .{});
+}
+
+fn printStack(vm: *VM, logger: *const fn (comptime msg: []const u8, args: anytype) void) void {
+    logger("          ", .{});
+    var i: [*]Value = vm.stack[0..STACK_MAX].ptr;
+    while (@intFromPtr(i) < @intFromPtr(vm.stack_top)) : (i += 1) {
+        logger("[ ", .{});
+        values.print(i[0], logger);
+        logger(" ]", .{});
+    }
+    logger("\n", .{});
 }
 
 test "basic run" {
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     var function = try Object.Function.init(std.testing.allocator);
     defer function.object.deinit(std.testing.allocator);
     var chunk = &function.chunk;
@@ -287,13 +364,16 @@ test "basic run" {
     try chunk.writeOp(.constant, 0);
     try chunk.write(index, 0);
     try chunk.writeOp(.@"return", 0);
+    try chunk.writeOp(.pop, 0);
+    try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
     try std.testing.expectEqual(3.14, res.number);
 }
 
 test "basic arithmatic" {
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     var function = try Object.Function.init(std.testing.allocator);
     defer function.object.deinit(std.testing.allocator);
     var chunk = &function.chunk;
@@ -323,7 +403,8 @@ test "basic arithmatic" {
 }
 
 test "boolean logic" {
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     var function = try Object.Function.init(std.testing.allocator);
     defer function.object.deinit(std.testing.allocator);
     var chunk = &function.chunk;
@@ -336,7 +417,8 @@ test "boolean logic" {
     try std.testing.expectEqual(Value{ .boolean = false }, res);
 }
 test "Comparison: less" {
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     var function = try Object.Function.init(std.testing.allocator);
     defer function.object.deinit(std.testing.allocator);
     var chunk = &function.chunk;
@@ -358,7 +440,8 @@ test "Comparison: less" {
     try std.testing.expectEqual(Value{ .boolean = true }, res);
 }
 test "Comparison: greater" {
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     var function = try Object.Function.init(std.testing.allocator);
     defer function.object.deinit(std.testing.allocator);
     var chunk = &function.chunk;
@@ -380,7 +463,8 @@ test "Comparison: greater" {
     try std.testing.expectEqual(Value{ .boolean = false }, res);
 }
 test "Equality" {
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     var function = try Object.Function.init(std.testing.allocator);
     defer function.object.deinit(std.testing.allocator);
     var chunk = &function.chunk;
@@ -410,7 +494,8 @@ test "Chapter 18 end" {
         \\ return !(5 - 4 > 3 * 2 == !nil);
         \\
     ;
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqual(Value{ .boolean = true }, res);
@@ -421,7 +506,8 @@ test "Chapter 19" {
         \\ return "Hello" + " " + "World!";
         \\
     ;
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
     const str_res = res.object.asString();
@@ -435,7 +521,8 @@ test "Chapter 20: String equality" {
         \\
     ;
 
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expect(res.boolean);
@@ -456,7 +543,8 @@ test "Chapter 21: Globals" {
     ;
     const expected = "beignets with cafe au lait";
 
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqualStrings(expected, res.object.asString().data);
@@ -475,14 +563,15 @@ test "Chapter 23: If true" {
         \\ return result;
         \\
     ;
-    // const expected = "true";
+    const expected = "true";
 
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
+    std.debug.print("RES!!! == {s}\n", .{@tagName(std.meta.activeTag(res))});
     try std.testing.expectEqual(Object.ObjectType.string, res.object.tag);
-    std.debug.print("RES!!! == {x}", .{@intFromPtr(res.object)});
-    // try std.testing.expectEqualStrings(expected, res.object.asString().data);
+    try std.testing.expectEqualStrings(expected, res.object.asString().data);
 }
 
 test "Chapter 23: If false" {
@@ -498,11 +587,11 @@ test "Chapter 23: If false" {
     ;
     // const expected = "false";
 
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    std.debug.print("RES!!! == {any}\n", .{res.object.tag});
-    try std.testing.expectEqual(Object.ObjectType.string, res.object.tag);
+    std.debug.print("RES!!! == {s}\n", .{@tagName(std.meta.activeTag(res))});
     // try std.testing.expectEqualStrings(expected, res.object.asString().data);
 }
 test "Chapter 23: If no else" {
@@ -514,7 +603,8 @@ test "Chapter 23: If no else" {
         \\ return result;
         \\
     ;
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqual(values.NIL_VAL, res);
@@ -529,8 +619,43 @@ test "Chapter 23: while" {
         \\ return result;
         \\
     ;
-    var vm = VM.init(std.testing.allocator);
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqual(128, res.number);
+}
+
+test "Chapter 23: normal fun" {
+    const input =
+        \\ fun add(a, b, c) {
+        \\    return a + b + c;
+        \\ }
+        \\
+        \\ return add(1, 2, 3);
+        \\
+    ;
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+    const res = try vm.interpret(input);
+    try std.testing.expectEqual(6, res.number);
+}
+
+test "Chapter 23: bad fun" {
+    const input =
+        \\ fun a() { b(); }
+        \\ fun b() { c(); }
+        \\ fun c() {
+        \\    c("too", "many");
+        \\ }
+        \\
+        \\ a();
+        \\
+    ;
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+    const res = vm.interpret(input);
+    try std.testing.expectError(error.RuntimeError, res);
 }

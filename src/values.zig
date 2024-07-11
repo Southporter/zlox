@@ -76,5 +76,8 @@ pub fn printObject(object: *Object, printer: Printer) void {
                 printer("<script>", .{});
             }
         },
+        .native => {
+            printer("<fn native>", .{});
+        },
     }
 }

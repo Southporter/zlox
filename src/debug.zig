@@ -42,6 +42,7 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .jump => jumpInstruction("OP_JUMP", 1, chunk, offset, writer),
         .jump_if_false => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset, writer),
         .loop => jumpInstruction("OP_LOOP", -1, chunk, offset, writer),
+        .call => byteInstruction("OP_CALL", chunk, offset, writer),
         .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
@@ -77,10 +78,13 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: a
                 .function => {
                     const fun = obj.asFunction();
                     if (fun.name) |n| {
-                        try writer.print("<fn {s}\n", .{n.data});
+                        try writer.print("<fn {s}>\n", .{n.data});
                     } else {
                         _ = try writer.write("<script>\n");
                     }
+                },
+                .native => {
+                    _ = try writer.write("<fn native>\n");
                 },
             }
         },

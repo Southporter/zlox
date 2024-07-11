@@ -1,0 +1,8 @@
+var result;
+if (true) {
+  result = "true";
+} else {
+  result = "false";
+}
+
+return result;

@@ -2,10 +2,12 @@ const std = @import("std");
 const Object = @This();
 const assert = std.debug.assert;
 const Chunk = @import("Chunk.zig");
+const Value = @import("values.zig").Value;
 
 pub const ObjectType = enum {
     string,
     function,
+    native,
 };
 
 tag: ObjectType,
@@ -35,6 +37,10 @@ pub fn asFunction(object: *Object) *Function {
     assert(object.tag == .function);
     return @alignCast(@fieldParentPtr("object", object));
 }
+pub fn asNative(object: *Object) *Native {
+    assert(object.tag == .native);
+    return @alignCast(@fieldParentPtr("object", object));
+}
 
 pub fn deinit(object: *Object, allocator: std.mem.Allocator) void {
     switch (object.tag) {
@@ -47,6 +53,10 @@ pub fn deinit(object: *Object, allocator: std.mem.Allocator) void {
             const fun = object.asFunction();
             fun.deinit();
             allocator.destroy(fun);
+        },
+        .native => {
+            const native = object.asNative();
+            allocator.destroy(native);
         },
     }
 }
@@ -118,4 +128,23 @@ pub const Function = struct {
     pub fn deinit(fun: *Function) void {
         fun.chunk.deinit();
     }
+};
+
+pub const NativeFn = *const fn (u8, [*]Value) Value;
+
+pub const Native = struct {
+    object: Object,
+    function: NativeFn,
+
+    pub fn init(allocator: std.mem.Allocator, function: NativeFn) !*Native {
+        var native = try allocator.create(Native);
+        native.object = .{
+            .tag = .native,
+        };
+        native.function = function;
+
+        return native;
+    }
+
+    pub fn deinit(_: *Native) void {}
 };

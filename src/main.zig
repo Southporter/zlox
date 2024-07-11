@@ -1,8 +1,10 @@
 const std = @import("std");
 const zlox = @import("zlox");
+const builtin = @import("builtin");
 
 pub const std_options = .{
     .logFn = logFn,
+    .log_level = if (builtin.mode == .Debug) .debug else .info,
 };
 
 pub fn logFn(

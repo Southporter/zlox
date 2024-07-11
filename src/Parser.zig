@@ -51,7 +51,7 @@ pub fn synchronize(parser: *Parser) void {
     }
 }
 
-fn errorAtCurrent(parser: *Parser, message: []const u8) void {
+pub fn errorAtCurrent(parser: *Parser, message: []const u8) void {
     parser.errorAt(parser.current.?, message);
 }
 

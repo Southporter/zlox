@@ -13,7 +13,8 @@ pub fn repl(allocator: std.mem.Allocator) !void {
 
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
-    var vm = VM.init(arena.allocator());
+    var vm: VM = undefined;
+    vm.init(arena.allocator());
     var compiler = try Compiler.init(&vm.strings, arena.allocator(), .script);
     while (true) {
         _ = try out.write("> ");
@@ -29,8 +30,10 @@ pub fn runFile(filename: []const u8, allocator: std.mem.Allocator) !void {
     const input = try file.readToEndAlloc(allocator, 1024 * 1024 * 1024);
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer _ = arena.reset(.free_all);
-    var vm = VM.init(arena.allocator());
+    var vm: VM = undefined;
+    vm.init(arena.allocator());
     defer vm.deinit();
+    try vm.addNatives();
     const val = try vm.interpret(input);
     values.print(val, log.info);
 }
