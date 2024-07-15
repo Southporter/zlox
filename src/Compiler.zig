@@ -11,10 +11,17 @@ const debug = @import("debug.zig");
 const log = std.log.scoped(.compiler);
 
 const MAX_LOCALS = std.math.maxInt(u8) + 1;
+const MAX_UPVALUES = std.math.maxInt(u8) + 1;
 
 const Local = struct {
     name: Scanner.Token,
     depth: isize,
+    is_captured: bool,
+};
+
+const Upvalue = struct {
+    index: u8,
+    is_local: bool,
 };
 
 const FunctionType = enum {
@@ -29,9 +36,15 @@ string_pool: *StringPool,
 function: *Object.Function,
 function_type: FunctionType = .script,
 
-locals: [MAX_LOCALS]Local = [_]Local{Local{ .name = Scanner.Token{ .line = 0, .raw = "", .tag = .@"error" }, .depth = -1 }} ** MAX_LOCALS,
+locals: [MAX_LOCALS]Local = [_]Local{Local{
+    .name = Scanner.Token{ .line = 0, .raw = "", .tag = .@"error" },
+    .depth = -1,
+    .is_captured = false,
+}} ** MAX_LOCALS,
 local_count: usize = 0,
+upvalues: [MAX_UPVALUES]Upvalue = undefined,
 scope_depth: isize = 0,
+enclosing: ?*Compiler = null,
 
 pub fn deinit(compiler: *Compiler) void {
     compiler.string_pool.deinit();
@@ -208,7 +221,11 @@ pub fn init(string_pool: *StringPool, allocator: std.mem.Allocator, function_typ
         .string_pool = string_pool,
         .function = try Object.Function.init(allocator),
         .function_type = function_type,
-        .locals = [1]Local{.{ .name = Scanner.Token{ .tag = .identifier, .raw = "", .line = 0 }, .depth = 0 }} ++ [1]Local{.{ .name = Scanner.Token{ .tag = .@"error", .raw = "", .line = 0 }, .depth = -1 }} ** (MAX_LOCALS - 1),
+        .locals = [1]Local{.{
+            .name = Scanner.Token{ .tag = .identifier, .raw = "", .line = 0 },
+            .depth = 0,
+            .is_captured = false,
+        }} ++ [1]Local{.{ .name = Scanner.Token{ .tag = .@"error", .raw = "", .line = 0 }, .depth = -1, .is_captured = false }} ** (MAX_LOCALS - 1),
         .local_count = 1,
         .allocator = allocator,
     };
@@ -284,7 +301,6 @@ fn emitLoop(compiler: *Compiler, start: usize) !void {
 
 fn patchJump(compiler: *Compiler, offset: usize) void {
     var chunk = compiler.currentChunk();
-    std.debug.print("Patching with {} - {} - 2\n", .{ chunk.count, offset });
     const jump = chunk.count - offset - 2;
 
     if (jump > std.math.maxInt(u16)) {
@@ -297,6 +313,10 @@ fn patchJump(compiler: *Compiler, offset: usize) void {
 
 fn emitConstant(compiler: *Compiler, constant: values.Value) !void {
     try compiler.emitOpAndArg(.constant, try compiler.makeConstant(constant));
+}
+
+fn emitClosure(compiler: *Compiler, function: *Object.Function) !void {
+    try compiler.emitOpAndArg(.closure, try compiler.makeConstant(.{ .object = &function.object }));
 }
 
 fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
@@ -319,7 +339,6 @@ fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
 
 fn declaration(compiler: *Compiler) CompileError!void {
     if (compiler.parser.match(.@"var")) {
-        log.debug("Parsing a var declaration\n", .{});
         try compiler.varDeclaration();
     } else if (compiler.parser.match(.fun)) {
         try compiler.funDeclaration();
@@ -397,11 +416,11 @@ fn addLocal(compiler: *Compiler, name: Scanner.Token) void {
     compiler.locals[compiler.local_count] = .{
         .name = name,
         .depth = -1,
+        .is_captured = false,
     };
 }
 
-fn resolveLocal(compiler: *Compiler) isize {
-    const name = compiler.parser.previous.?;
+fn resolveLocal(compiler: *Compiler, name: Scanner.Token) isize {
     if (compiler.local_count == 0) {
         return -1;
     }
@@ -418,15 +437,59 @@ fn resolveLocal(compiler: *Compiler) isize {
     return -1;
 }
 
+fn resolveUpvalue(compiler: *Compiler, name: Scanner.Token) isize {
+    if (compiler.enclosing) |enclosing| {
+        const local = enclosing.resolveLocal(name);
+        if (local != -1) {
+            enclosing.locals[@intCast(local)].is_captured = true;
+            return compiler.addUpvalue(@intCast(local), true);
+        }
+
+        const upvalue = enclosing.resolveUpvalue(name);
+        if (upvalue != -1) {
+            return compiler.addUpvalue(@intCast(upvalue), false);
+        }
+    }
+    return -1;
+}
+
+fn addUpvalue(compiler: *Compiler, index: u8, is_local: bool) u8 {
+    const upvalue_count = compiler.function.upvalue_count;
+
+    for (compiler.upvalues[0..upvalue_count], 0..) |upvalue, i| {
+        if (upvalue.index == index and upvalue.is_local == is_local) {
+            return @intCast(i);
+        }
+    }
+
+    if (upvalue_count == MAX_UPVALUES) {
+        compiler.parser.err("Too many closure variables in function.");
+        return 0;
+    }
+
+    compiler.upvalues[upvalue_count].is_local = is_local;
+    compiler.upvalues[upvalue_count].index = index;
+
+    compiler.function.upvalue_count += 1;
+    return @intCast(upvalue_count);
+}
+
 fn namedVariable(compiler: *Compiler, can_assign: bool) CompileError!void {
     var getOp = Chunk.Opcode.get_global;
     var setOp = Chunk.Opcode.set_global;
-    var op_arg = compiler.resolveLocal();
+    const name = compiler.parser.previous.?;
+    var op_arg = compiler.resolveLocal(name);
     if (op_arg != -1) {
         setOp = .set_local;
         getOp = .get_local;
     } else {
-        op_arg = try compiler.identifierConstant();
+        op_arg = compiler.resolveUpvalue(name);
+        if (op_arg != -1) {
+            setOp = .set_upvalue;
+            getOp = .get_upvalue;
+        } else {
+            op_arg = try compiler.identifierConstant();
+        }
     }
 
     if (can_assign and compiler.parser.match(.equal)) {
@@ -444,7 +507,11 @@ fn endScope(compiler: *Compiler) CompileError!void {
     compiler.scope_depth -= 1;
 
     while (compiler.local_count > 0 and compiler.locals[compiler.local_count - 1].depth > compiler.scope_depth) : (compiler.local_count -= 1) {
-        try compiler.emitOp(.pop);
+        if (compiler.locals[compiler.local_count - 1].is_captured) {
+            try compiler.emitOp(.close_upvalue);
+        } else {
+            try compiler.emitOp(.pop);
+        }
     }
 }
 
@@ -633,6 +700,7 @@ fn args(compiler: *Compiler) CompileError!void {
 
 fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
     var fun_compiler = try Compiler.init(compiler.string_pool, compiler.allocator, function_type);
+    fun_compiler.enclosing = compiler;
     fun_compiler.function.name = (try compiler.copyIdentifier()).asString();
     fun_compiler.beginScope();
     fun_compiler.parser = compiler.parser;
@@ -646,7 +714,14 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
 
     const function = try fun_compiler.endCompilation();
     compiler.parser = fun_compiler.parser;
-    try compiler.emitConstant(.{ .object = &function.object });
+    try compiler.emitClosure(function);
+
+    std.debug.print("Adding {d} upvalues\n", .{function.upvalue_count});
+    for (fun_compiler.upvalues[0..function.upvalue_count]) |upvalue| {
+        std.debug.print("Emitting upvalue: {} at {d}\n", .{ upvalue.is_local, upvalue.index });
+        try compiler.emitByte(if (upvalue.is_local) 1 else 0);
+        try compiler.emitByte(upvalue.index);
+    }
 }
 
 fn copyString(compiler: *Compiler) !*Object {
@@ -1133,7 +1208,7 @@ test "Chapter 24: function declaration" {
     const func = try compiler.compile(source);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
-        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.closure), 1,
         @intFromEnum(Chunk.Opcode.define_global), 0,
         @intFromEnum(Chunk.Opcode.get_global), 0,
         @intFromEnum(Chunk.Opcode.print),
@@ -1150,5 +1225,83 @@ test "Chapter 24: function declaration" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func_decl.chunk.code[0..func_decl.chunk.count]);
+
+}
+
+test "Chapter 25: closure upvalues" {
+    const source =
+        \\ fun outer() {
+        \\   var a = 1;
+        \\   var b = 2;
+        \\   fun middle() {
+        \\     var c = 3;
+        \\     var d = 4;
+        \\     fun inner() {
+        \\       print a + c + b + d;
+        \\     }
+        \\   }
+        \\ }
+        \\
+    ;
+
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+
+    var pool = StringPool.init(arena.allocator());
+    var compiler = try Compiler.init(&pool, arena.allocator(), .script);
+
+    const script = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.closure), 1,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, script.chunk.code[0..script.chunk.count]);
+    const outer = script.chunk.constants.items[1].object.asFunction();
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.closure), 2,
+            // Upvalues
+            1, 1,
+            1, 2,
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, outer.chunk.code[0..outer.chunk.count]);
+    const middle = outer.chunk.constants.items[2].object.asFunction();
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.closure), 2,
+            // Upvalues
+            0, 0,
+            1, 1,
+            0, 1,
+            1, 2,
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, middle.chunk.code[0..middle.chunk.count]);
+    const inner = middle.chunk.constants.items[2].object.asFunction();
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.get_upvalue), 0,
+        @intFromEnum(Chunk.Opcode.get_upvalue), 1,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.get_upvalue), 2,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.get_upvalue), 3,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, inner.chunk.code[0..inner.chunk.count]);
 
 }

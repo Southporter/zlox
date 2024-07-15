@@ -19,13 +19,14 @@ stack: [STACK_MAX]Value = undefined,
 stack_top: [*]Value = undefined,
 arena: std.heap.ArenaAllocator = undefined,
 objects: ?*Object = null,
+openUpvalues: ?*Object.Upvalue = null,
 strings: StringPool = undefined,
 globals: Table = undefined,
 frames: [FRAMES_MAX]CallFrame = undefined,
 frame_count: usize = 0,
 
 const CallFrame = struct {
-    function: *Object.Function,
+    closure: *Object.Closure,
     ip: [*]u8,
     slots: [*]Value,
 
@@ -41,11 +42,11 @@ const CallFrame = struct {
     }
     fn readConstant(frame: *CallFrame) Value {
         const index = frame.readByte();
-        return frame.function.chunk.getConstant(index);
+        return frame.closure.function.chunk.getConstant(index);
     }
     fn printConstants(frame: *CallFrame) void {
         log.debug("           ", .{});
-        for (frame.function.chunk.constants.items) |constant| {
+        for (frame.closure.function.chunk.constants.items) |constant| {
             log.debug("| ", .{});
             values.print(constant, log.debug);
             log.debug(" |", .{});
@@ -54,10 +55,13 @@ const CallFrame = struct {
     }
 
     fn getName(frame: *CallFrame) []const u8 {
-        if (frame.function.name) |name| {
+        if (frame.closure.function.name) |name| {
             return name.data;
         }
         return "script";
+    }
+    fn chunk(frame: *CallFrame) *Chunk {
+        return &frame.closure.function.chunk;
     }
 };
 
@@ -68,6 +72,7 @@ pub fn init(vm: *VM, allocator: std.mem.Allocator) void {
     vm.globals = Table.init(arena_allocator) catch unreachable;
     vm.stack_top = vm.stack[0..STACK_MAX].ptr;
     vm.objects = null;
+    vm.openUpvalues = null;
     vm.frame_count = 0;
 }
 
@@ -98,7 +103,10 @@ pub fn interpret(vm: *VM, input: []const u8) Error!Value {
 
 pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
     vm.push(.{ .object = &function.object });
-    if (!vm.call(function, 0)) {
+    const closure = try Object.Closure.init(vm.arena.allocator(), function);
+    _ = vm.pop();
+    vm.push(.{ .object = &closure.object });
+    if (!vm.call(closure, 0)) {
         return error.RuntimeError;
     }
     return vm.run();
@@ -110,11 +118,12 @@ pub fn run(vm: *VM) Error!Value {
     while (true) {
         vm.printStack(log.debug);
         // try debug.disassembleChunk(&frame.function.chunk, frame.getName(), debug.Writer);
-        _ = debug.disassembleInstruction(&frame.function.chunk, @intFromPtr(frame.ip) - @intFromPtr(frame.function.chunk.code.ptr), debug.Writer) catch {};
+        _ = debug.disassembleInstruction(frame.chunk(), @intFromPtr(frame.ip) - @intFromPtr(frame.chunk().code.ptr), debug.Writer) catch {};
         const op: Chunk.Opcode = @enumFromInt(frame.readByte());
         switch (op) {
             .@"return" => {
                 const result = vm.pop();
+                vm.closeUpvalues(&frame.slots[0]);
                 vm.frame_count -= 1;
                 if (vm.frame_count == 0) {
                     // _ = vm.pop();
@@ -142,6 +151,20 @@ pub fn run(vm: *VM) Error!Value {
                     return error.RuntimeError;
                 }
                 frame = &vm.frames[vm.frame_count - 1];
+            },
+            .closure => {
+                const fun = frame.readConstant().object.as(Object.Function);
+                const closure = try Object.Closure.init(vm.arena.allocator(), fun);
+                vm.push(.{ .object = &closure.object });
+                for (closure.upvalues) |*upvalue| {
+                    const is_local = frame.readByte();
+                    const index = frame.readByte();
+                    if (is_local == 1) {
+                        upvalue.* = try vm.captureUpvalue(&(frame.slots + index)[0]);
+                    } else {
+                        upvalue.* = frame.closure.upvalues[index];
+                    }
+                }
             },
             .constant => {
                 vm.push(frame.readConstant());
@@ -179,6 +202,18 @@ pub fn run(vm: *VM) Error!Value {
             .set_local => {
                 const slot = frame.readByte();
                 frame.slots[slot] = vm.peek(0);
+            },
+            .get_upvalue => {
+                const slot = frame.readByte();
+                vm.push(frame.closure.upvalues[slot].?.location.*);
+            },
+            .set_upvalue => {
+                const slot = frame.readByte();
+                frame.closure.upvalues[slot].?.location.* = vm.peek(0);
+            },
+            .close_upvalue => {
+                vm.closeUpvalues(&(vm.stack_top - 1)[0]);
+                _ = vm.pop();
             },
             .print => {
                 values.print(vm.pop(), log.info);
@@ -259,7 +294,7 @@ fn get(vm: *VM, distance: usize) *Value {
 fn callValue(vm: *VM, callee: Value, arg_count: u8) bool {
     if (std.meta.activeTag(callee) == .object) {
         switch (callee.object.tag) {
-            .function => return vm.call(callee.object.asFunction(), arg_count),
+            .closure => return vm.call(callee.object.as(Object.Closure), arg_count),
             .native => {
                 const native = callee.object.asNative();
                 const args = vm.stack_top - arg_count;
@@ -275,9 +310,9 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) bool {
     return false;
 }
 
-fn call(vm: *VM, function: *Object.Function, arg_count: u8) bool {
-    if (arg_count != function.arity) {
-        vm.runtimeError("Expected {d} arguments but got {d}.\n", .{ function.arity, arg_count });
+fn call(vm: *VM, closure: *Object.Closure, arg_count: u8) bool {
+    if (arg_count != closure.function.arity) {
+        vm.runtimeError("Expected {d} arguments but got {d}.\n", .{ closure.function.arity, arg_count });
         return false;
     }
     if (vm.frame_count == FRAMES_MAX) {
@@ -286,10 +321,41 @@ fn call(vm: *VM, function: *Object.Function, arg_count: u8) bool {
     }
     var frame = &vm.frames[vm.frame_count];
     vm.frame_count += 1;
-    frame.function = function;
-    frame.ip = function.chunk.code.ptr;
+    frame.closure = closure;
+    frame.ip = closure.function.chunk.code.ptr;
     frame.slots = vm.stack_top - 1 - arg_count;
     return true;
+}
+
+fn captureUpvalue(vm: *VM, local: *Value) !*Object.Upvalue {
+    var prevUpvalue: ?*Object.Upvalue = null;
+    var upvalue = vm.openUpvalues;
+    while (upvalue != null and @intFromPtr(upvalue.?.location) > @intFromPtr(local)) {
+        prevUpvalue = upvalue;
+        upvalue = upvalue.?.next;
+    }
+
+    if (upvalue != null and upvalue.?.location == local) {
+        return upvalue.?;
+    }
+    var created = try Object.Upvalue.init(vm.arena.allocator(), local);
+    created.next = upvalue;
+    if (prevUpvalue) |prev| {
+        prev.next = created;
+    } else {
+        vm.openUpvalues = created;
+    }
+    return created;
+}
+
+fn closeUpvalues(vm: *VM, last: *Value) void {
+    while (vm.openUpvalues != null and @intFromPtr(vm.openUpvalues.?.location) >= @intFromPtr(last)) {
+        var upvalue = vm.openUpvalues.?;
+        upvalue.closed = upvalue.location.*;
+        upvalue.location = &upvalue.closed;
+
+        vm.openUpvalues = upvalue.next;
+    }
 }
 
 fn concatenate(vm: *VM) !void {
@@ -336,7 +402,7 @@ fn runtimeError(vm: *VM, comptime fmt: []const u8, args: anytype) void {
     var i = vm.frame_count;
     while (i > 0) : (i -= 1) {
         const frame = vm.frames[i - 1];
-        const fun = frame.function;
+        const fun = frame.closure.function;
         const instruction = @intFromPtr(frame.ip) - @intFromPtr(fun.chunk.code.ptr);
         const name = if (fun.name) |n| n.data else "script";
         log.err("[line {d}] in {s}()\n", .{ fun.chunk.lines.items[instruction], name });
@@ -357,8 +423,8 @@ fn printStack(vm: *VM, logger: *const fn (comptime msg: []const u8, args: anytyp
 test "basic run" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
-    var function = try Object.Function.init(std.testing.allocator);
-    defer function.object.deinit(std.testing.allocator);
+    defer vm.deinit();
+    var function = try Object.Function.init(vm.arena.allocator());
     var chunk = &function.chunk;
     const index = try chunk.addConstant(.{ .number = 3.14 });
     try chunk.writeOp(.constant, 0);
@@ -374,8 +440,8 @@ test "basic run" {
 test "basic arithmatic" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
-    var function = try Object.Function.init(std.testing.allocator);
-    defer function.object.deinit(std.testing.allocator);
+    defer vm.deinit();
+    var function = try Object.Function.init(vm.arena.allocator());
     var chunk = &function.chunk;
 
     const pi = 3.1415926;
@@ -405,8 +471,8 @@ test "basic arithmatic" {
 test "boolean logic" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
-    var function = try Object.Function.init(std.testing.allocator);
-    defer function.object.deinit(std.testing.allocator);
+    defer vm.deinit();
+    var function = try Object.Function.init(vm.arena.allocator());
     var chunk = &function.chunk;
 
     try chunk.writeOp(.true, 0);
@@ -419,8 +485,8 @@ test "boolean logic" {
 test "Comparison: less" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
-    var function = try Object.Function.init(std.testing.allocator);
-    defer function.object.deinit(std.testing.allocator);
+    defer vm.deinit();
+    var function = try Object.Function.init(vm.arena.allocator());
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -442,8 +508,8 @@ test "Comparison: less" {
 test "Comparison: greater" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
-    var function = try Object.Function.init(std.testing.allocator);
-    defer function.object.deinit(std.testing.allocator);
+    defer vm.deinit();
+    var function = try Object.Function.init(vm.arena.allocator());
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -465,8 +531,8 @@ test "Comparison: greater" {
 test "Equality" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
-    var function = try Object.Function.init(std.testing.allocator);
-    defer function.object.deinit(std.testing.allocator);
+    defer vm.deinit();
+    var function = try Object.Function.init(vm.arena.allocator());
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -658,4 +724,35 @@ test "Chapter 23: bad fun" {
     defer vm.deinit();
     const res = vm.interpret(input);
     try std.testing.expectError(error.RuntimeError, res);
+}
+
+test "Chapter 25: Closure upvalues" {
+    const input =
+        \\ fun outer() {
+        \\   var a = 1;
+        \\   var b = 2;
+        \\   fun middle() {
+        \\     var c = 3;
+        \\     var d = 4;
+        \\     fun inner() {
+        \\       return a + c + b + d;
+        \\     }
+        \\
+        \\     return inner;
+        \\   }
+        \\   return middle;
+        \\ }
+        \\ var mid = outer();
+        \\ var inner = mid();
+        \\ var res = inner();
+        \\ return res;
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = try vm.interpret(input);
+    try std.testing.expectEqual(10, res.number);
 }

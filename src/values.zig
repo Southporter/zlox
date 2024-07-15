@@ -41,6 +41,15 @@ pub const Value = union(ValueTag) {
             else => false,
         };
     }
+    pub fn unwrap(value: *const Value) Value {
+        return switch (value.*) {
+            .object => |obj| switch (obj.tag) {
+                .upvalue => obj.as(Object.Upvalue).closed,
+                else => value.*,
+            },
+            else => |val| val,
+        };
+    }
     pub fn equal(a: *const Value, b: Value) bool {
         if (std.meta.activeTag(a.*) != std.meta.activeTag(b)) return false;
         return switch (a.*) {
@@ -78,6 +87,14 @@ pub fn printObject(object: *Object, printer: Printer) void {
         },
         .native => {
             printer("<fn native>", .{});
+        },
+        .closure => {
+            printer("<closure>", .{});
+        },
+        .upvalue => {
+            printer("<upvalue ", .{});
+            print(object.as(Object.Upvalue).location.*, printer);
+            printer(">", .{});
         },
     }
 }

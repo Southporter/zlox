@@ -126,8 +126,8 @@ test "Basic set/get" {
     const allocator = std.testing.allocator;
     const key1_raw = "hello";
     const key2_raw = "world";
-    var key1 = try Object.String.from(key1_raw);
-    var key2 = try Object.String.from(key2_raw);
+    var key1 = Object.String.from(key1_raw);
+    var key2 = Object.String.from(key2_raw);
 
     var table = try Table.init(allocator);
     defer table.deinit();

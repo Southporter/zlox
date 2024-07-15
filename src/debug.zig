@@ -1,5 +1,7 @@
 const std = @import("std");
 const Chunk = @import("Chunk.zig");
+const values = @import("values.zig");
+const Object = @import("Object.zig");
 
 const log = std.log.scoped(.debugger);
 
@@ -38,11 +40,15 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .set_global => constantInstruction("OP_SET_GLOBAL", chunk, offset, writer),
         .get_local => byteInstruction("OP_GET_LOCAL", chunk, offset, writer),
         .set_local => byteInstruction("OP_SET_LOCAL", chunk, offset, writer),
+        .get_upvalue => byteInstruction("OP_GET_LOCAL", chunk, offset, writer),
+        .set_upvalue => byteInstruction("OP_SET_LOCAL", chunk, offset, writer),
+        .close_upvalue => simpleInstruction("OP_CLOSE_UPVALUE", offset, writer),
         .print => simpleInstruction("OP_PRINT", offset, writer),
         .jump => jumpInstruction("OP_JUMP", 1, chunk, offset, writer),
         .jump_if_false => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset, writer),
         .loop => jumpInstruction("OP_LOOP", -1, chunk, offset, writer),
         .call => byteInstruction("OP_CALL", chunk, offset, writer),
+        .closure => closureInstruction(chunk, offset, writer),
         .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
@@ -68,28 +74,56 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: a
     const index = chunk.code[offset + 1];
     const constant = chunk.constants.items[index];
     try writer.print("{s:<16} {d:>4} ", .{ name, index });
+    try printValue(constant, writer);
+    _ = try writer.write("\n");
+    return offset + 2;
+}
+
+fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
+    var new_offset = offset;
+    const index = chunk.code[offset + 1];
+    try writer.print("{s:<16} {d:>4} ", .{ "OP_CLOSURE", index });
+    const constant = chunk.constants.items[index];
+    try printValue(constant, writer);
+    _ = try writer.write("\n");
+    new_offset += 2;
+
+    std.debug.print("constant {any}\n", .{constant});
+    const fun = constant.object.as(Object.Function);
+    var j: usize = 0;
+    while (j < fun.upvalue_count) : (j += 1) {
+        defer new_offset += 2;
+        const is_local = chunk.code[new_offset];
+        const upvalue_index = chunk.code[new_offset + 1];
+        try writer.print("{d:0>4}    |                     {s} {d}\n", .{ new_offset, if (is_local == 1) "local" else "upvalue", upvalue_index });
+    }
+    return new_offset;
+}
+
+fn printValue(constant: values.Value, writer: anytype) !void {
     switch (constant) {
-        .number => |val| try writer.print("{any}\n", .{val}),
-        .boolean => |val| try writer.print("{}\n", .{val}),
-        .nil => _ = try writer.write("nil\n"),
+        .number => |val| try writer.print("{any}", .{val}),
+        .boolean => |val| try writer.print("{}", .{val}),
+        .nil => _ = try writer.write("nil"),
         .object => |obj| {
             switch (obj.tag) {
-                .string => try writer.print("\"{s}\"\n", .{obj.asString().data}),
+                .string => try writer.print("\"{s}\"", .{obj.asString().data}),
                 .function => {
                     const fun = obj.asFunction();
                     if (fun.name) |n| {
-                        try writer.print("<fn {s}>\n", .{n.data});
+                        try writer.print("<fn {s}>", .{n.data});
                     } else {
-                        _ = try writer.write("<script>\n");
+                        _ = try writer.write("<script>");
                     }
                 },
+                .closure => unreachable,
                 .native => {
-                    _ = try writer.write("<fn native>\n");
+                    _ = try writer.write("<fn native>");
                 },
+                .upvalue => _ = try writer.write("<upvalue>"),
             }
         },
     }
-    return offset + 2;
 }
 
 fn byteInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: anytype) !usize {
@@ -109,6 +143,7 @@ fn jumpInstruction(name: []const u8, sign: isize, chunk: *Chunk, offset: usize, 
 
 test "Simple dissassembly" {
     var chunk = try Chunk.init(std.testing.allocator);
+
     defer chunk.deinit();
     try chunk.writeOp(.@"return", 123);
     try chunk.writeOp(.constant, 123);
@@ -142,7 +177,24 @@ test "Simple dissassembly" {
     try chunk.write(0, 128);
     try chunk.write(9, 128);
 
-    var buf: [512]u8 = undefined;
+    var fun = try Object.Function.init(std.testing.allocator);
+    defer fun.object.deinit(std.testing.allocator);
+    fun.upvalue_count = 4;
+    var fun_name = Object.String.from("inner");
+    fun.name = &fun_name;
+    const fun_index = try chunk.addConstant(.{ .object = &fun.object });
+    try chunk.writeOp(.closure, 129);
+    try chunk.write(fun_index, 129);
+    try chunk.write(1, 129);
+    try chunk.write(0, 129);
+    try chunk.write(0, 129);
+    try chunk.write(1, 129);
+    try chunk.write(1, 129);
+    try chunk.write(1, 129);
+    try chunk.write(0, 129);
+    try chunk.write(2, 129);
+
+    var buf: [1024]u8 = undefined;
     var stream = std.io.fixedBufferStream(&buf);
     var writer = stream.writer();
 
@@ -169,7 +221,12 @@ test "Simple dissassembly" {
         \\0020  128 OP_JUMP            20 -> 35
         \\0023    | OP_JUMP_IF_FALSE   23 -> 282
         \\0026    | OP_LOOP            26 -> 20
+        \\0029  129 OP_CLOSURE          2 <fn inner>
+        \\0031    |                     local 0
+        \\0033    |                     upvalue 1
+        \\0035    |                     local 1
+        \\0037    |                     upvalue 2
         \\
     ;
-    try std.testing.expectEqualSlices(u8, output, buf[0..output.len]);
+    try std.testing.expectEqualStrings(output, buf[0..output.len]);
 }

@@ -2,12 +2,15 @@ const std = @import("std");
 const Object = @This();
 const assert = std.debug.assert;
 const Chunk = @import("Chunk.zig");
-const Value = @import("values.zig").Value;
+const values = @import("values.zig");
+const Value = values.Value;
 
 pub const ObjectType = enum {
     string,
     function,
     native,
+    closure,
+    upvalue,
 };
 
 tag: ObjectType,
@@ -26,11 +29,24 @@ pub fn equal(a: *Object, b: *Object) bool {
             const fun_b = b.asFunction();
             return fun_a.arity == fun_b.arity and std.mem.eql(u8, fun_a.name.data, fun_b.name.data);
         },
+        .native => {
+            return a.asNative().function == b.as(Native).function;
+        },
+        .closure => {
+            return false;
+        },
     }
+}
+
+pub fn as(object: *Object, comptime T: type) *T {
+    const tag_name = @tagName(object.tag);
+    const type_name = @typeName(T);
+    assert(std.ascii.eqlIgnoreCase(tag_name, type_name[type_name.len - tag_name.len ..]));
+    return @alignCast(@fieldParentPtr("object", object));
 }
 pub fn asString(object: *Object) *String {
     assert(object.tag == .string);
-    return @alignCast(@fieldParentPtr("object", object));
+    return object.as(String);
 }
 
 pub fn asFunction(object: *Object) *Function {
@@ -45,18 +61,27 @@ pub fn asNative(object: *Object) *Native {
 pub fn deinit(object: *Object, allocator: std.mem.Allocator) void {
     switch (object.tag) {
         .string => {
-            const str = object.asString();
+            const str = object.as(String);
             str.deinit(allocator);
             allocator.destroy(str);
         },
         .function => {
-            const fun = object.asFunction();
+            const fun = object.as(Function);
             fun.deinit();
             allocator.destroy(fun);
         },
         .native => {
-            const native = object.asNative();
+            const native = object.as(Native);
             allocator.destroy(native);
+        },
+        .closure => {
+            const closure = object.as(Closure);
+            closure.deinit(allocator);
+            allocator.destroy(closure);
+        },
+        .upvalue => {
+            const upvalue = object.as(Upvalue);
+            allocator.destroy(upvalue);
         },
     }
 }
@@ -70,7 +95,7 @@ pub const String = struct {
         allocator.free(self.data);
     }
 
-    pub fn from(raw: []const u8) !String {
+    pub fn from(raw: []const u8) String {
         return .{
             .object = .{
                 .tag = .string,
@@ -111,6 +136,7 @@ pub fn hashString(str: []const u8) u32 {
 pub const Function = struct {
     object: Object,
     arity: usize,
+    upvalue_count: usize,
     chunk: Chunk,
     name: ?*String,
 
@@ -120,6 +146,7 @@ pub const Function = struct {
             .tag = .function,
         };
         fun.arity = 0;
+        fun.upvalue_count = 0;
         fun.chunk = try Chunk.init(allocator);
         fun.name = null;
         return fun;
@@ -147,4 +174,45 @@ pub const Native = struct {
     }
 
     pub fn deinit(_: *Native) void {}
+};
+
+pub const Closure = struct {
+    object: Object,
+    function: *Function,
+    upvalues: []?*Upvalue,
+
+    pub fn init(allocator: std.mem.Allocator, function: *Function) !*Closure {
+        var closure = try allocator.create(Closure);
+        closure.object = .{
+            .tag = .closure,
+        };
+        closure.function = function;
+        closure.upvalues = try allocator.alloc(?*Upvalue, function.upvalue_count);
+        for (closure.upvalues) |*upvalues| {
+            upvalues.* = null;
+        }
+        return closure;
+    }
+
+    pub fn deinit(closure: *Closure, allocator: std.mem.Allocator) void {
+        allocator.free(closure.upvalues);
+    }
+};
+
+pub const Upvalue = struct {
+    object: Object = .{
+        .tag = .upvalue,
+    },
+    location: *Value,
+    closed: Value,
+    next: ?*Upvalue = null,
+
+    pub fn init(allocator: std.mem.Allocator, slot: *Value) !*Upvalue {
+        var upvalue = try allocator.create(Upvalue);
+        upvalue.object = .{ .tag = .upvalue };
+        upvalue.location = slot;
+        upvalue.next = null;
+        upvalue.closed = values.NIL_VAL;
+        return upvalue;
+    }
 };
