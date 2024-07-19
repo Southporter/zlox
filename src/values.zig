@@ -1,5 +1,6 @@
 const std = @import("std");
 const Object = @import("Object.zig");
+const debug = @import("debug.zig");
 
 pub const TRUE_VAL = Value{ .boolean = true };
 pub const FALSE_VAL = Value{ .boolean = false };
@@ -59,6 +60,13 @@ pub const Value = union(ValueTag) {
             .object => |obj| obj == b.object,
         };
     }
+
+    pub fn format(value: Value, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+
+        try debug.printValue(value, writer);
+    }
 };
 
 pub const ValueArray = std.ArrayListUnmanaged(Value);
@@ -76,7 +84,7 @@ pub fn print(value: Value, printer: Printer) void {
 
 pub fn printObject(object: *Object, printer: Printer) void {
     switch (object.tag) {
-        .string => printer("\"{s}\"", .{object.asString().data}),
+        .string => printer("{s}", .{object.asString().data}),
         .function => {
             const fun = object.asFunction();
             if (fun.name) |name| {
@@ -92,9 +100,9 @@ pub fn printObject(object: *Object, printer: Printer) void {
             printer("<closure>", .{});
         },
         .upvalue => {
-            printer("<upvalue ", .{});
+            printer("upvalue ", .{});
             print(object.as(Object.Upvalue).location.*, printer);
-            printer(">", .{});
+            // printer("", .{});
         },
     }
 }

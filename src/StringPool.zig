@@ -3,10 +3,11 @@ const StringPool = @This();
 const Object = @import("Object.zig");
 const Table = @import("Table.zig");
 const Value = @import("values.zig").Value;
+const Manager = @import("memory.zig").Manager;
 
-table: Table,
+table: Table = undefined,
 
-pub fn init(allocator: std.mem.Allocator) StringPool {
+pub fn init(allocator: *Manager) StringPool {
     return .{
         .table = Table.init(allocator) catch unreachable,
     };

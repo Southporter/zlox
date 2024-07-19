@@ -4,6 +4,7 @@ const Chunk = @This();
 const values = @import("values.zig");
 const ValueArray = values.ValueArray;
 const Value = values.Value;
+const Manager = @import("memory.zig").Manager;
 
 pub const Opcode = enum(u8) {
     @"return",
@@ -41,23 +42,20 @@ code: []u8,
 count: usize = 0,
 constants: ValueArray,
 lines: std.ArrayListUnmanaged(usize),
-arena: std.heap.ArenaAllocator,
+allocator: std.mem.Allocator,
 
-pub fn init(child_allocator: std.mem.Allocator) !Chunk {
-    var arena = std.heap.ArenaAllocator.init(child_allocator);
+pub fn init(alloc: std.mem.Allocator) !Chunk {
     return .{
-        .code = try arena.allocator().alloc(u8, 8),
+        .code = try alloc.alloc(u8, 8),
         .constants = ValueArray{},
         .lines = std.ArrayListUnmanaged(usize){},
-        .arena = arena,
+        .allocator = alloc,
     };
 }
 pub fn deinit(chunk: *Chunk) void {
-    chunk.arena.deinit();
-}
-
-pub fn allocator(chunk: *Chunk) std.mem.Allocator {
-    return chunk.arena.allocator();
+    chunk.allocator.free(chunk.code);
+    chunk.lines.deinit(chunk.allocator);
+    chunk.constants.deinit(chunk.allocator);
 }
 
 pub fn writeOp(chunk: *Chunk, op: Opcode, line: usize) !void {
@@ -69,7 +67,7 @@ pub fn write(chunk: *Chunk, byte: u8, line: usize) !void {
         try chunk.grow();
     }
     chunk.code[chunk.count] = byte;
-    try chunk.lines.append(chunk.allocator(), line);
+    try chunk.lines.append(chunk.allocator, line);
     chunk.count += 1;
 }
 
@@ -88,11 +86,11 @@ test "Write and reallocate" {
 
 fn grow(chunk: *Chunk) !void {
     const new_cap = if (chunk.code.len < 8) 8 else chunk.code.len * 2;
-    chunk.code = try chunk.allocator().realloc(chunk.code, new_cap);
+    chunk.code = try chunk.allocator.realloc(chunk.code, new_cap);
 }
 
 pub fn addConstant(chunk: *Chunk, value: Value) !u8 {
-    try chunk.constants.append(chunk.allocator(), value);
+    try chunk.constants.append(chunk.allocator, value);
     const index = chunk.constants.items.len - 1;
     if (index > std.math.maxInt(u8)) {
         return error.ConstantOverflow;

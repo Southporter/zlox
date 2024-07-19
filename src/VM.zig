@@ -1,4 +1,5 @@
 const std = @import("std");
+const std_builtin = @import("builtin");
 const log = std.log.scoped(.vm);
 
 const VM = @This();
@@ -11,16 +12,16 @@ const debug = @import("debug.zig");
 const StringPool = @import("StringPool.zig");
 const Table = @import("Table.zig");
 const builtins = @import("builtins.zig");
+const Manager = @import("memory.zig").Manager;
 
 const STACK_MAX = 256 * FRAMES_MAX;
 const FRAMES_MAX = 64;
 
 stack: [STACK_MAX]Value = undefined,
 stack_top: [*]Value = undefined,
-arena: std.heap.ArenaAllocator = undefined,
-objects: ?*Object = null,
+manager: Manager,
+root_compiler: Compiler,
 openUpvalues: ?*Object.Upvalue = null,
-strings: StringPool = undefined,
 globals: Table = undefined,
 frames: [FRAMES_MAX]CallFrame = undefined,
 frame_count: usize = 0,
@@ -66,18 +67,16 @@ const CallFrame = struct {
 };
 
 pub fn init(vm: *VM, allocator: std.mem.Allocator) void {
-    vm.arena = std.heap.ArenaAllocator.init(allocator);
-    const arena_allocator = vm.arena.allocator();
-    vm.strings = StringPool.init(arena_allocator);
-    vm.globals = Table.init(arena_allocator) catch unreachable;
+    vm.manager.init(allocator);
+    vm.globals = Table.init(&vm.manager) catch unreachable;
     vm.stack_top = vm.stack[0..STACK_MAX].ptr;
-    vm.objects = null;
     vm.openUpvalues = null;
     vm.frame_count = 0;
 }
 
 pub fn addNatives(vm: *VM) !void {
     try vm.defineNative("clock", builtins.clock);
+    try vm.defineNative("toString", builtins.toString);
 }
 
 pub fn deinit(vm: *VM) void {
@@ -86,24 +85,23 @@ pub fn deinit(vm: *VM) void {
     // var object = vm.objects;
     // while (object) |obj| {
     //     object = obj.next;
-    //     obj.deinit(vm.arena.allocator());
+    //     obj.deinit(vm.manager.inner());
     // }
-    // vm.strings.deinit();
     // vm.globals.deinit();
-    vm.arena.deinit();
+    vm.manager.deinit();
 }
 
-pub const Error = error{ CompileError, RuntimeError } || std.mem.Allocator.Error;
+pub const Error = error{ CompileError, RuntimeError } || Manager.Error || Object.NativeError;
 
 pub fn interpret(vm: *VM, input: []const u8) Error!Value {
-    var compiler: Compiler = try Compiler.init(&vm.strings, vm.arena.allocator(), .script);
-    const func = compiler.compile(input) catch return error.CompileError;
+    vm.root_compiler = try Compiler.init(&vm.manager, .script);
+    const func = vm.root_compiler.compile(input) catch return error.CompileError;
     return try vm.interpretFunction(func);
 }
 
 pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
     vm.push(.{ .object = &function.object });
-    const closure = try Object.Closure.init(vm.arena.allocator(), function);
+    const closure = try vm.manager.allocClosure(function);
     _ = vm.pop();
     vm.push(.{ .object = &closure.object });
     if (!vm.call(closure, 0)) {
@@ -115,9 +113,9 @@ pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
 pub fn run(vm: *VM) Error!Value {
     var frame = &vm.frames[vm.frame_count - 1];
 
+    try debug.disassembleChunk(frame.chunk(), frame.getName(), debug.Writer);
     while (true) {
-        vm.printStack(log.debug);
-        // try debug.disassembleChunk(&frame.function.chunk, frame.getName(), debug.Writer);
+        // vm.printStack(log.debug);
         _ = debug.disassembleInstruction(frame.chunk(), @intFromPtr(frame.ip) - @intFromPtr(frame.chunk().code.ptr), debug.Writer) catch {};
         const op: Chunk.Opcode = @enumFromInt(frame.readByte());
         switch (op) {
@@ -147,14 +145,14 @@ pub fn run(vm: *VM) Error!Value {
             },
             .call => {
                 const arg_count = frame.readByte();
-                if (!vm.callValue(vm.peek(arg_count), arg_count)) {
+                if (!try vm.callValue(vm.peek(arg_count), arg_count)) {
                     return error.RuntimeError;
                 }
                 frame = &vm.frames[vm.frame_count - 1];
             },
             .closure => {
                 const fun = frame.readConstant().object.as(Object.Function);
-                const closure = try Object.Closure.init(vm.arena.allocator(), fun);
+                const closure = try vm.manager.allocClosure(fun);
                 vm.push(.{ .object = &closure.object });
                 for (closure.upvalues) |*upvalue| {
                     const is_local = frame.readByte();
@@ -216,8 +214,7 @@ pub fn run(vm: *VM) Error!Value {
                 _ = vm.pop();
             },
             .print => {
-                values.print(vm.pop(), log.info);
-                log.info("\n", .{});
+                values.print(vm.pop(), log.warn);
             },
             .pop => _ = vm.pop(),
             .true => vm.push(values.TRUE_VAL),
@@ -291,14 +288,14 @@ fn get(vm: *VM, distance: usize) *Value {
     return &value_ptr[0];
 }
 
-fn callValue(vm: *VM, callee: Value, arg_count: u8) bool {
+fn callValue(vm: *VM, callee: Value, arg_count: u8) !bool {
     if (std.meta.activeTag(callee) == .object) {
         switch (callee.object.tag) {
             .closure => return vm.call(callee.object.as(Object.Closure), arg_count),
             .native => {
                 const native = callee.object.asNative();
                 const args = vm.stack_top - arg_count;
-                const result = native.function(arg_count, args);
+                const result = try native.function(arg_count, args, &vm.manager);
                 vm.stack_top -= arg_count + 1;
                 vm.push(result);
                 return true;
@@ -338,7 +335,7 @@ fn captureUpvalue(vm: *VM, local: *Value) !*Object.Upvalue {
     if (upvalue != null and upvalue.?.location == local) {
         return upvalue.?;
     }
-    var created = try Object.Upvalue.init(vm.arena.allocator(), local);
+    var created = try vm.manager.allocUpvalue(local);
     created.next = upvalue;
     if (prevUpvalue) |prev| {
         prev.next = created;
@@ -359,45 +356,29 @@ fn closeUpvalues(vm: *VM, last: *Value) void {
 }
 
 fn concatenate(vm: *VM) !void {
-    const b = vm.pop();
-    const a = vm.pop();
-    const str_a = a.object.asString();
-    const str_b = b.object.asString();
+    const str_b = vm.peek(0).object.asString();
+    const str_a = vm.peek(1).object.asString();
 
-    var allocator = vm.arena.allocator();
-    var new_raw = try allocator.alloc(u8, str_a.data.len + str_b.data.len);
-    @memcpy(new_raw[0..str_a.data.len], str_a.data);
-    @memcpy(new_raw[str_a.data.len..], str_b.data);
+    const new_str = try vm.manager.concat(str_a.data, str_b.data);
 
-    vm.push(.{ .object = try vm.copyString(new_raw, allocator) });
-}
-
-fn copyString(vm: *VM, string: []const u8, allocator: std.mem.Allocator) !*Object {
-    if (vm.strings.find(string)) |interned| {
-        allocator.free(string);
-        return &interned.object;
-    } else {
-        const str = try Object.String.fromAlloc(string, allocator);
-        try vm.strings.set(str, values.NIL_VAL);
-        const obj = &str.object;
-        str.object.next = vm.objects;
-        vm.objects = obj;
-        return obj;
-    }
+    _ = vm.pop();
+    _ = vm.pop();
+    vm.push(.{ .object = new_str });
 }
 
 fn defineNative(vm: *VM, name: []const u8, func: Object.NativeFn) !void {
-    const allocator = vm.arena.allocator();
-    vm.push(.{ .object = try vm.copyString(name, allocator) });
-    const native = try Object.Native.init(allocator, func);
-    vm.push(.{ .object = &native.object });
+    vm.push(.{ .object = try vm.manager.copy(name) });
+    const native = try vm.manager.allocObject(Object.Native);
+    native.as(Object.Native).function = func;
+    vm.push(.{ .object = native });
     std.debug.assert(try vm.globals.set(vm.stack[0].object.asString(), vm.stack[1]));
     _ = vm.pop();
     _ = vm.pop();
 }
 
 fn runtimeError(vm: *VM, comptime fmt: []const u8, args: anytype) void {
-    log.err(fmt, args);
+    const logger = if (std_builtin.is_test) log.warn else log.err;
+    logger(fmt, args);
 
     var i = vm.frame_count;
     while (i > 0) : (i -= 1) {
@@ -405,7 +386,7 @@ fn runtimeError(vm: *VM, comptime fmt: []const u8, args: anytype) void {
         const fun = frame.closure.function;
         const instruction = @intFromPtr(frame.ip) - @intFromPtr(fun.chunk.code.ptr);
         const name = if (fun.name) |n| n.data else "script";
-        log.err("[line {d}] in {s}()\n", .{ fun.chunk.lines.items[instruction], name });
+        logger("[line {d}] in {s}()\n", .{ fun.chunk.lines.items[instruction], name });
     }
 }
 
@@ -424,7 +405,7 @@ test "basic run" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(vm.arena.allocator());
+    var function = try Object.Function.init(&vm.manager);
     var chunk = &function.chunk;
     const index = try chunk.addConstant(.{ .number = 3.14 });
     try chunk.writeOp(.constant, 0);
@@ -441,7 +422,7 @@ test "basic arithmatic" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(vm.arena.allocator());
+    var function = try Object.Function.init(&vm.manager);
     var chunk = &function.chunk;
 
     const pi = 3.1415926;
@@ -472,7 +453,7 @@ test "boolean logic" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(vm.arena.allocator());
+    var function = try Object.Function.init(&vm.manager);
     var chunk = &function.chunk;
 
     try chunk.writeOp(.true, 0);
@@ -486,7 +467,7 @@ test "Comparison: less" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(vm.arena.allocator());
+    var function = try Object.Function.init(&vm.manager);
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -509,7 +490,7 @@ test "Comparison: greater" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(vm.arena.allocator());
+    var function = try Object.Function.init(&vm.manager);
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -532,7 +513,7 @@ test "Equality" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(vm.arena.allocator());
+    var function = try Object.Function.init(&vm.manager);
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -578,7 +559,7 @@ test "Chapter 19" {
     const res = try vm.interpret(input);
     const str_res = res.object.asString();
     try std.testing.expectEqualStrings("Hello World!", str_res.data);
-    try std.testing.expectEqual(res.object, vm.objects.?);
+    try std.testing.expectEqual(res.object, vm.manager.objects.?);
 }
 
 test "Chapter 20: String equality" {
@@ -592,10 +573,7 @@ test "Chapter 20: String equality" {
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expect(res.boolean);
-    // Because of interning, the "Hello" created by concatenation
-    // will reference the same string as the "Hello" constant.
-    // It should not be added to the objects tracking list
-    try std.testing.expectEqual(null, vm.objects);
+    try std.testing.expect(null != vm.manager.objects.?.next);
 }
 
 test "Chapter 21: Globals" {
@@ -614,8 +592,7 @@ test "Chapter 21: Globals" {
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqualStrings(expected, res.object.asString().data);
-    try std.testing.expect(vm.objects != null);
-    // try std.testing.expectEqual(null, vm.objects.?.next);
+    try std.testing.expect(vm.manager.objects != null);
 }
 
 test "Chapter 23: If true" {
@@ -635,7 +612,6 @@ test "Chapter 23: If true" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    std.debug.print("RES!!! == {s}\n", .{@tagName(std.meta.activeTag(res))});
     try std.testing.expectEqual(Object.ObjectType.string, res.object.tag);
     try std.testing.expectEqualStrings(expected, res.object.asString().data);
 }
@@ -651,14 +627,13 @@ test "Chapter 23: If false" {
         \\ return result;
         \\
     ;
-    // const expected = "false";
+    const expected = "false";
 
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    std.debug.print("RES!!! == {s}\n", .{@tagName(std.meta.activeTag(res))});
-    // try std.testing.expectEqualStrings(expected, res.object.asString().data);
+    try std.testing.expectEqualStrings(expected, res.object.asString().data);
 }
 test "Chapter 23: If no else" {
     const input =
@@ -722,6 +697,7 @@ test "Chapter 23: bad fun" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
+
     const res = vm.interpret(input);
     try std.testing.expectError(error.RuntimeError, res);
 }

@@ -2,6 +2,7 @@ const std = @import("std");
 const Chunk = @import("Chunk.zig");
 const values = @import("values.zig");
 const Object = @import("Object.zig");
+const Manager = @import("memory.zig").Manager;
 
 const log = std.log.scoped(.debugger);
 
@@ -88,7 +89,6 @@ fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
     _ = try writer.write("\n");
     new_offset += 2;
 
-    std.debug.print("constant {any}\n", .{constant});
     const fun = constant.object.as(Object.Function);
     var j: usize = 0;
     while (j < fun.upvalue_count) : (j += 1) {
@@ -100,7 +100,7 @@ fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
     return new_offset;
 }
 
-fn printValue(constant: values.Value, writer: anytype) !void {
+pub fn printValue(constant: values.Value, writer: anytype) !void {
     switch (constant) {
         .number => |val| try writer.print("{any}", .{val}),
         .boolean => |val| try writer.print("{}", .{val}),
@@ -177,8 +177,11 @@ test "Simple dissassembly" {
     try chunk.write(0, 128);
     try chunk.write(9, 128);
 
-    var fun = try Object.Function.init(std.testing.allocator);
-    defer fun.object.deinit(std.testing.allocator);
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var fun = try Object.Function.init(&manager);
     fun.upvalue_count = 4;
     var fun_name = Object.String.from("inner");
     fun.name = &fun_name;
