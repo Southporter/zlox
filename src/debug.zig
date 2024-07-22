@@ -41,15 +41,18 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .set_global => constantInstruction("OP_SET_GLOBAL", chunk, offset, writer),
         .get_local => byteInstruction("OP_GET_LOCAL", chunk, offset, writer),
         .set_local => byteInstruction("OP_SET_LOCAL", chunk, offset, writer),
-        .get_upvalue => byteInstruction("OP_GET_LOCAL", chunk, offset, writer),
-        .set_upvalue => byteInstruction("OP_SET_LOCAL", chunk, offset, writer),
+        .get_upvalue => byteInstruction("OP_GET_UPVALUE", chunk, offset, writer),
+        .set_upvalue => byteInstruction("OP_SET_UPVALUE", chunk, offset, writer),
         .close_upvalue => simpleInstruction("OP_CLOSE_UPVALUE", offset, writer),
+        .get_property => constantInstruction("OP_GET_PROPERTY", chunk, offset, writer),
+        .set_property => constantInstruction("OP_SET_PROPERTY", chunk, offset, writer),
         .print => simpleInstruction("OP_PRINT", offset, writer),
         .jump => jumpInstruction("OP_JUMP", 1, chunk, offset, writer),
         .jump_if_false => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset, writer),
         .loop => jumpInstruction("OP_LOOP", -1, chunk, offset, writer),
         .call => byteInstruction("OP_CALL", chunk, offset, writer),
         .closure => closureInstruction(chunk, offset, writer),
+        .class => constantInstruction("OP_CLASS", chunk, offset, writer),
         .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
@@ -107,9 +110,9 @@ pub fn printValue(constant: values.Value, writer: anytype) !void {
         .nil => _ = try writer.write("nil"),
         .object => |obj| {
             switch (obj.tag) {
-                .string => try writer.print("\"{s}\"", .{obj.asString().data}),
+                .string => try writer.print("\"{s}\"", .{obj.as(Object.String).data}),
                 .function => {
-                    const fun = obj.asFunction();
+                    const fun = obj.as(Object.Function);
                     if (fun.name) |n| {
                         try writer.print("<fn {s}>", .{n.data});
                     } else {
@@ -121,6 +124,8 @@ pub fn printValue(constant: values.Value, writer: anytype) !void {
                     _ = try writer.write("<fn native>");
                 },
                 .upvalue => _ = try writer.write("<upvalue>"),
+                .class => try writer.print("{s}", .{obj.as(Object.Class).name}),
+                .instance => try writer.print("{s} instance", .{obj.as(Object.Instance).class.name}),
             }
         },
     }

@@ -1,0 +1,19 @@
+class Brioche {}
+
+println(Brioche);
+
+var bun = Brioche();
+
+println(bun);
+
+bun.meat = "ham";
+
+print bun.meat;
+
+
+class Pair {}
+
+var pair = Pair();
+pair.first = 1;
+pair.second = 2;
+println(pair.first + pair.second);

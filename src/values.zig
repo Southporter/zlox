@@ -42,6 +42,13 @@ pub const Value = union(ValueTag) {
             else => false,
         };
     }
+
+    pub fn isInstance(value: *const Value) bool {
+        return switch (value.*) {
+            .object => |obj| obj.tag == .instance,
+            else => false,
+        };
+    }
     pub fn unwrap(value: *const Value) Value {
         return switch (value.*) {
             .object => |obj| switch (obj.tag) {
@@ -84,9 +91,9 @@ pub fn print(value: Value, printer: Printer) void {
 
 pub fn printObject(object: *Object, printer: Printer) void {
     switch (object.tag) {
-        .string => printer("{s}", .{object.asString().data}),
+        .string => printer("{s}", .{object.as(Object.String).data}),
         .function => {
-            const fun = object.asFunction();
+            const fun = object.as(Object.Function);
             if (fun.name) |name| {
                 printer("<fn {s}>", .{name.data});
             } else {
@@ -103,6 +110,12 @@ pub fn printObject(object: *Object, printer: Printer) void {
             printer("upvalue ", .{});
             print(object.as(Object.Upvalue).location.*, printer);
             // printer("", .{});
+        },
+        .class => {
+            printer("{s}", .{object.as(Object.Class).name});
+        },
+        .instance => {
+            printer("{s} instance", .{object.as(Object.Instance).class.name});
         },
     }
 }

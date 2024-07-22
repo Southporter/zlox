@@ -15,15 +15,18 @@ pub const Opcode = enum(u8) {
     loop,
     call,
     closure,
-    constant, //0x08
+    class, //0x08
+    constant,
     define_global,
     get_global,
     set_global,
     get_local,
     set_local,
     get_upvalue,
-    set_upvalue,
-    close_upvalue, // 0x10
+    set_upvalue, // 0x10
+    close_upvalue,
+    get_property,
+    set_property,
     nil,
     true,
     false,

@@ -139,6 +139,10 @@ const rules = blk: {
     map.set(.nil, ParseRule{
         .prefix = literal,
     });
+    map.set(.dot, ParseRule{
+        .infix = dot,
+        .precedence = .call,
+    });
     map.set(.bang, ParseRule{
         .prefix = unary,
     });
@@ -335,7 +339,9 @@ fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
 }
 
 fn declaration(compiler: *Compiler) CompileError!void {
-    if (compiler.parser.match(.@"var")) {
+    if (compiler.parser.match(.class)) {
+        try compiler.classDeclaration();
+    } else if (compiler.parser.match(.@"var")) {
         try compiler.varDeclaration();
     } else if (compiler.parser.match(.fun)) {
         try compiler.funDeclaration();
@@ -361,6 +367,18 @@ fn funDeclaration(compiler: *Compiler) CompileError!void {
     compiler.markInitialized();
     try compiler.compileFunction(.function);
     try compiler.defineVariable(global);
+}
+
+fn classDeclaration(compiler: *Compiler) CompileError!void {
+    compiler.parser.consume(.identifier, "Expect class name.");
+    const name = try compiler.identifierConstant();
+    compiler.declareVariable();
+
+    try compiler.emitOpAndArg(.class, name);
+    try compiler.defineVariable(name);
+
+    compiler.parser.consume(.left_brace, "Expect '{' before class body.");
+    compiler.parser.consume(.right_brace, "Expect '}' after class body.");
 }
 
 fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
@@ -660,6 +678,18 @@ fn call(compiler: *Compiler, _: bool) CompileError!void {
     try compiler.emitOpAndArg(.call, arg_count);
 }
 
+fn dot(compiler: *Compiler, can_assign: bool) CompileError!void {
+    compiler.parser.consume(.identifier, "Expected property name after '.'.");
+    const name = try compiler.identifierConstant();
+
+    if (can_assign and compiler.parser.match(.equal)) {
+        try compiler.expression();
+        try compiler.emitOpAndArg(.set_property, name);
+    } else {
+        try compiler.emitOpAndArg(.get_property, name);
+    }
+}
+
 fn argList(compiler: *Compiler) CompileError!u8 {
     var arg_count: u8 = 0;
     if (!compiler.parser.check(.right_paren)) {
@@ -699,7 +729,7 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
     var fun_compiler = try Compiler.init(compiler.manager, function_type);
     fun_compiler.enclosing = compiler;
     compiler.inner = &fun_compiler;
-    fun_compiler.function.name = (try compiler.copyIdentifier()).asString();
+    fun_compiler.function.name = (try compiler.copyIdentifier()).as(Object.String);
     fun_compiler.beginScope();
     fun_compiler.parser = compiler.parser;
     fun_compiler.parser.consume(.left_paren, "Expect '(' after function name.");
@@ -938,11 +968,11 @@ test "Chapter 21: Globals" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualStrings("empty", func.chunk.constants.items[0].object.asString().data);
-    try std.testing.expectEqualStrings("breakfast", func.chunk.constants.items[1].object.asString().data);
-    try std.testing.expectEqualStrings("beignets",func. chunk.constants.items[2].object.asString().data);
-    try std.testing.expectEqualStrings("beverage", func.chunk.constants.items[3].object.asString().data);
-    try std.testing.expectEqualStrings("cafe au lait", func.chunk.constants.items[4].object.asString().data);
+    try std.testing.expectEqualStrings("empty", func.chunk.constants.items[0].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("breakfast", func.chunk.constants.items[1].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("beignets",func. chunk.constants.items[2].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("beverage", func.chunk.constants.items[3].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("cafe au lait", func.chunk.constants.items[4].object.as(Object.String).data);
 }
 
 // test "Chapter 22: Conflicting locals" {
@@ -1011,8 +1041,8 @@ test "Chapter 22: variables" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualStrings("test", func.chunk.constants.items[0].object.asString().data);
-    try std.testing.expectEqualStrings(" is successful", func.chunk.constants.items[1].object.asString().data);
+    try std.testing.expectEqualStrings("test", func.chunk.constants.items[0].object.as(Object.String).data);
+    try std.testing.expectEqualStrings(" is successful", func.chunk.constants.items[1].object.as(Object.String).data);
 }
 
 test "Chapter 22: block global access" {
@@ -1045,8 +1075,8 @@ test "Chapter 22: block global access" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualStrings("global", func.chunk.constants.items[0].object.asString().data);
-    try std.testing.expectEqualStrings("test", func.chunk.constants.items[1].object.asString().data);
+    try std.testing.expectEqualStrings("global", func.chunk.constants.items[0].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("test", func.chunk.constants.items[1].object.as(Object.String).data);
 }
 
 
@@ -1207,7 +1237,7 @@ test "Chapter 24: function declaration" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    const func_decl = func.chunk.constants.items[1].object.asFunction();
+    const func_decl = func.chunk.constants.items[1].object.as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.get_local), 1,
@@ -1250,7 +1280,7 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, script.chunk.code[0..script.chunk.count]);
-    const outer = script.chunk.constants.items[1].object.asFunction();
+    const outer = script.chunk.constants.items[1].object.as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
@@ -1263,7 +1293,7 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, outer.chunk.code[0..outer.chunk.count]);
-    const middle = outer.chunk.constants.items[2].object.asFunction();
+    const middle = outer.chunk.constants.items[2].object.as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
@@ -1278,7 +1308,7 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, middle.chunk.code[0..middle.chunk.count]);
-    const inner = middle.chunk.constants.items[2].object.asFunction();
+    const inner = middle.chunk.constants.items[2].object.as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.get_upvalue), 0,
@@ -1294,5 +1324,39 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, inner.chunk.code[0..inner.chunk.count]);
+
+}
+
+test "Chapter 27: classes" {
+    const source =
+        \\ class Test {}
+        \\
+        \\ var test = Test();
+        \\
+        \\ test.success = true;
+        \\
+    ;
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var compiler = try Compiler.init(&manager, .script);
+
+    const script = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.class), 0,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.call), 0,
+        @intFromEnum(Chunk.Opcode.define_global), 1,
+        @intFromEnum(Chunk.Opcode.get_global), 1,
+        @intFromEnum(Chunk.Opcode.true),
+        @intFromEnum(Chunk.Opcode.set_property), 2,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, script.chunk.code[0..script.chunk.count]);
 
 }

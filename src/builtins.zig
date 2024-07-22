@@ -1,13 +1,24 @@
 const std = @import("std");
-const Value = @import("values.zig").Value;
+const vals = @import("values.zig");
+const Value = vals.Value;
 const Manager = @import("memory.zig").Manager;
 const NativeError = @import("Object.zig").NativeError;
+
+const log = std.log.scoped(.builtins);
 
 pub fn clock(arg_count: u8, _: [*]Value, _: *Manager) NativeError!Value {
     std.debug.assert(arg_count == 0);
     return .{
         .number = @floatFromInt(std.time.timestamp()),
     };
+}
+
+pub fn println(arg_count: u8, values: [*]Value, _: *Manager) NativeError!Value {
+    std.debug.assert(arg_count == 1);
+    const val = values[0];
+    vals.print(val, log.warn);
+    log.warn("\n", .{});
+    return vals.NIL_VAL;
 }
 
 fn floatToString(f: f64, manager: *Manager) !Value {

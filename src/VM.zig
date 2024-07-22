@@ -45,6 +45,11 @@ const CallFrame = struct {
         const index = frame.readByte();
         return frame.closure.function.chunk.getConstant(index);
     }
+
+    fn readString(frame: *CallFrame) *Object.String {
+        const constant = frame.readConstant();
+        return constant.object.as(Object.String);
+    }
     fn printConstants(frame: *CallFrame) void {
         log.debug("           ", .{});
         for (frame.closure.function.chunk.constants.items) |constant| {
@@ -77,6 +82,7 @@ pub fn init(vm: *VM, allocator: std.mem.Allocator) void {
 pub fn addNatives(vm: *VM) !void {
     try vm.defineNative("clock", builtins.clock);
     try vm.defineNative("toString", builtins.toString);
+    try vm.defineNative("println", builtins.println);
 }
 
 pub fn deinit(vm: *VM) void {
@@ -164,17 +170,22 @@ pub fn run(vm: *VM) Error!Value {
                     }
                 }
             },
+            .class => {
+                const name = frame.readConstant().object.as(Object.String);
+                const class = try vm.manager.allocClass(name);
+                vm.push(.{ .object = &class.object });
+            },
             .constant => {
                 vm.push(frame.readConstant());
             },
             .define_global => {
                 const constant = frame.readConstant();
-                const name = constant.object.asString();
+                const name = constant.object.as(Object.String);
                 _ = try vm.globals.set(name, vm.peek(0));
                 _ = vm.pop();
             },
             .get_global => {
-                const name = frame.readConstant().object.asString();
+                const name = frame.readConstant().object.as(Object.String);
                 const value = vm.globals.get(name);
 
                 if (value) |val| {
@@ -185,7 +196,7 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .set_global => {
-                const name = frame.readConstant().object.asString();
+                const name = frame.readConstant().object.as(Object.String);
                 const is_new = try vm.globals.set(name, vm.peek(0));
                 if (is_new) {
                     _ = vm.globals.delete(name);
@@ -212,6 +223,32 @@ pub fn run(vm: *VM) Error!Value {
             .close_upvalue => {
                 vm.closeUpvalues(&(vm.stack_top - 1)[0]);
                 _ = vm.pop();
+            },
+            .get_property => {
+                if (!vm.peek(0).isInstance()) {
+                    vm.runtimeError("Only instances have properties.", .{});
+                    return error.RuntimeError;
+                }
+                const inst = vm.peek(0).object.as(Object.Instance);
+                const name = frame.readString();
+                _ = vm.pop(); // Instance
+                if (inst.fields.get(name)) |val| {
+                    vm.push(val);
+                } else {
+                    vm.push(values.NIL_VAL);
+                }
+            },
+            .set_property => {
+                if (!vm.peek(1).isInstance()) {
+                    vm.runtimeError("Only instances have properties.", .{});
+                    return error.RuntimeError;
+                }
+                const inst = vm.peek(1).object.as(Object.Instance);
+                const name = frame.readString();
+                _ = try inst.fields.set(name, vm.peek(0));
+                const val = vm.pop();
+                _ = vm.pop(); // Instance
+                vm.push(val);
             },
             .print => {
                 values.print(vm.pop(), log.warn);
@@ -293,11 +330,20 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !bool {
         switch (callee.object.tag) {
             .closure => return vm.call(callee.object.as(Object.Closure), arg_count),
             .native => {
-                const native = callee.object.asNative();
+                const native = callee.object.as(Object.Native);
                 const args = vm.stack_top - arg_count;
                 const result = try native.function(arg_count, args, &vm.manager);
                 vm.stack_top -= arg_count + 1;
                 vm.push(result);
+                return true;
+            },
+            .class => {
+                const class = callee.object.as(Object.Class);
+                const instance = try vm.manager.allocInstance(class);
+                var top = vm.stack_top;
+                top -= arg_count;
+                top -= 1;
+                top[0] = .{ .object = &instance.object };
                 return true;
             },
             else => {},
@@ -356,8 +402,8 @@ fn closeUpvalues(vm: *VM, last: *Value) void {
 }
 
 fn concatenate(vm: *VM) !void {
-    const str_b = vm.peek(0).object.asString();
-    const str_a = vm.peek(1).object.asString();
+    const str_b = vm.peek(0).object.as(Object.String);
+    const str_a = vm.peek(1).object.as(Object.String);
 
     const new_str = try vm.manager.concat(str_a.data, str_b.data);
 
@@ -371,7 +417,7 @@ fn defineNative(vm: *VM, name: []const u8, func: Object.NativeFn) !void {
     const native = try vm.manager.allocObject(Object.Native);
     native.as(Object.Native).function = func;
     vm.push(.{ .object = native });
-    std.debug.assert(try vm.globals.set(vm.stack[0].object.asString(), vm.stack[1]));
+    std.debug.assert(try vm.globals.set(vm.stack[0].object.as(Object.String), vm.stack[1]));
     _ = vm.pop();
     _ = vm.pop();
 }
@@ -557,7 +603,7 @@ test "Chapter 19" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    const str_res = res.object.asString();
+    const str_res = res.object.as(Object.String);
     try std.testing.expectEqualStrings("Hello World!", str_res.data);
     try std.testing.expectEqual(res.object, vm.manager.objects.?);
 }
@@ -591,7 +637,7 @@ test "Chapter 21: Globals" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings(expected, res.object.asString().data);
+    try std.testing.expectEqualStrings(expected, res.object.as(Object.String).data);
     try std.testing.expect(vm.manager.objects != null);
 }
 
@@ -613,7 +659,7 @@ test "Chapter 23: If true" {
     defer vm.deinit();
     const res = try vm.interpret(input);
     try std.testing.expectEqual(Object.ObjectType.string, res.object.tag);
-    try std.testing.expectEqualStrings(expected, res.object.asString().data);
+    try std.testing.expectEqualStrings(expected, res.object.as(Object.String).data);
 }
 
 test "Chapter 23: If false" {
@@ -633,7 +679,7 @@ test "Chapter 23: If false" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings(expected, res.object.asString().data);
+    try std.testing.expectEqualStrings(expected, res.object.as(Object.String).data);
 }
 test "Chapter 23: If no else" {
     const input =
@@ -731,4 +777,67 @@ test "Chapter 25: Closure upvalues" {
 
     const res = try vm.interpret(input);
     try std.testing.expectEqual(10, res.number);
+}
+
+test "Chapter 27: Classes and Instances" {
+    const input =
+        \\ class Test {}
+        \\
+        \\ var test = Test();
+        \\ test.status = "success";
+        \\
+        \\ return test.status;
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = try vm.interpret(input);
+    try std.testing.expectEqualStrings("success", res.object.as(Object.String).data);
+}
+
+test "Chapter 27: Invalid set properties" {
+    const input =
+        \\ var test = "some test";
+        \\ test.succcess = true;
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = vm.interpret(input);
+    try std.testing.expectError(error.RuntimeError, res);
+}
+test "Chapter 27: Invalid get properties" {
+    const input =
+        \\ 3.test;
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = vm.interpret(input);
+    try std.testing.expectError(error.RuntimeError, res);
+}
+test "Chapter 27: Undefined properties" {
+    const input =
+        \\ class Test {}
+        \\
+        \\ var test = Test();
+        \\ return test.undefined;
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = vm.interpret(input);
+    try std.testing.expectEqual(values.NIL_VAL, res);
 }

@@ -184,6 +184,21 @@ pub const Manager = struct {
         return res;
     }
 
+    pub fn allocClass(manager: *Manager, name: *Object.String) !*Object.Class {
+        try manager.bookkeeping(@sizeOf(Object.Class), 1);
+        const res = try Object.Class.init(manager, name);
+        res.object.next = manager.objects;
+        manager.objects = &res.object;
+        return res;
+    }
+    pub fn allocInstance(manager: *Manager, class: *Object.Class) !*Object.Instance {
+        try manager.bookkeeping(@sizeOf(Object.Instance), 1);
+        const res = try Object.Instance.init(manager, class);
+        res.object.next = manager.objects;
+        manager.objects = &res.object;
+        return res;
+    }
+
     pub fn collect(manager: *Manager) !void {
         manager.is_collecting = true;
         defer manager.is_collecting = false;
@@ -284,6 +299,10 @@ pub const Manager = struct {
         log.debug("\n", .{});
 
         switch (object.tag) {
+            .class => {
+                const class = object.as(Object.Class);
+                try manager.markObject(&class.name.object);
+            },
             .closure => {
                 const closure = object.as(Object.Closure);
                 try manager.markObject(&closure.function.object);
@@ -299,6 +318,11 @@ pub const Manager = struct {
                     try manager.markObject(&name.object);
                 }
                 try manager.markArray(fun.chunk.constants);
+            },
+            .instance => {
+                const inst = object.as(Object.Instance);
+                try manager.markObject(&inst.class.object);
+                try manager.markTable(&inst.fields);
             },
             .upvalue => try manager.markValue(object.as(Object.Upvalue).closed),
             .native, .string => {},

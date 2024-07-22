@@ -5,6 +5,7 @@ const Chunk = @import("Chunk.zig");
 const values = @import("values.zig");
 const Value = values.Value;
 const Manager = @import("memory.zig").Manager;
+const Table = @import("Table.zig");
 
 pub const ObjectType = enum {
     string,
@@ -12,6 +13,8 @@ pub const ObjectType = enum {
     native,
     closure,
     upvalue,
+    class,
+    instance,
 };
 
 tag: ObjectType,
@@ -29,20 +32,20 @@ pub fn equal(a: *Object, b: *Object) bool {
     if (a.tag != b.tag) return false;
     switch (a.tag) {
         .string => {
-            const str_a = a.asString();
-            const str_b = b.asString();
+            const str_a = a.as(String);
+            const str_b = b.as(String);
             return std.mem.eql(u8, str_a.data, str_b.data);
         },
         .function => {
-            const fun_a = a.asFunction();
-            const fun_b = b.asFunction();
+            const fun_a = a.as(Function);
+            const fun_b = b.as(Function);
             return fun_a.arity == fun_b.arity and std.mem.eql(u8, fun_a.name.data, fun_b.name.data);
         },
         .native => {
-            return a.asNative().function == b.as(Native).function;
+            return a.as(Native).function == b.as(Native).function;
         },
-        .closure => {
-            return false;
+        .closure, .class, .instance => {
+            return a == b;
         },
     }
 }
@@ -51,19 +54,6 @@ pub fn as(object: *Object, comptime T: type) *T {
     const tag_name = @tagName(object.tag);
     const type_name = @typeName(T);
     assert(std.ascii.eqlIgnoreCase(tag_name, type_name[type_name.len - tag_name.len ..]));
-    return @alignCast(@fieldParentPtr("object", object));
-}
-pub fn asString(object: *Object) *String {
-    assert(object.tag == .string);
-    return object.as(String);
-}
-
-pub fn asFunction(object: *Object) *Function {
-    assert(object.tag == .function);
-    return @alignCast(@fieldParentPtr("object", object));
-}
-pub fn asNative(object: *Object) *Native {
-    assert(object.tag == .native);
     return @alignCast(@fieldParentPtr("object", object));
 }
 
@@ -92,6 +82,16 @@ pub fn deinit(object: *Object, manager: *Manager) void {
             const upvalue = object.as(Upvalue);
             manager.destroy(upvalue);
         },
+        .class => {
+            const class = object.as(Class);
+            class.deinit(manager);
+            manager.destroy(class);
+        },
+        .instance => {
+            const inst = object.as(Instance);
+            inst.deinit(manager);
+            manager.destroy(inst);
+        },
     }
 }
 
@@ -108,7 +108,7 @@ pub const String = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("String{{has_next: {}, is_marked: {}, hash: {d} }}", .{ string.object.next != null, string.object.is_marked, string.hash });
+        try writer.print("String{{has_next: {}, is_marked: {}, hash: {d}, data: {s} }}", .{ string.object.next != null, string.object.is_marked, string.hash, string.data });
     }
 
     pub fn from(raw: []const u8) String {
@@ -259,5 +259,59 @@ pub const Upvalue = struct {
         _ = options;
 
         try writer.print("Upvalue{{has_next: {}, is_marked: {}, value: {any} }}", .{ upvalue.object.next != null, upvalue.object.is_marked, upvalue.closed });
+    }
+};
+
+pub const Class = struct {
+    object: Object = .{
+        .tag = .class,
+    },
+    name: *String,
+
+    pub fn init(allocator: *Manager, name: *String) !*Class {
+        var class = try allocator.create(Class);
+        class.object = .{ .tag = .class };
+        class.name = name;
+        return class;
+    }
+
+    pub fn deinit(class: *Class, allocator: *Manager) void {
+        _ = class;
+        _ = allocator;
+    }
+
+    pub fn format(class: Class, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("{s}{{ }}", .{class.name.data});
+    }
+};
+
+pub const Instance = struct {
+    object: Object = .{
+        .tag = .instance,
+    },
+    class: *Class,
+    fields: Table,
+
+    pub fn init(allocator: *Manager, class: *Class) !*Instance {
+        var instance = try allocator.create(Instance);
+        instance.object = .{ .tag = .instance };
+        instance.class = class;
+        instance.fields = try Table.init(allocator);
+
+        return instance;
+    }
+
+    pub fn deinit(instance: *Instance, _: *Manager) void {
+        instance.fields.deinit();
+    }
+
+    pub fn format(instance: Instance, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
+        _ = fmt;
+        _ = options;
+
+        try writer.print("{s} instance {{ }}", .{instance.class.name.data});
     }
 };
