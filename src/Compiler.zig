@@ -874,12 +874,9 @@ test "Chunk compilation" {
         \\
     ;
 
-    var manager: Manager = undefined;
-    manager.init(std.testing.allocator);
-    defer manager.deinit();
-
     var compiler: Compiler = undefined;
-    compiler.function = try Object.Function.init(&manager);
+    compiler.function = try Object.Function.init(std.testing.allocator);
+    defer compiler.function.object.deinit(std.testing.allocator);
     const func = try compiler.compile(source);
 
     try std.testing.expectEqualSlices(u8, &[_]u8{

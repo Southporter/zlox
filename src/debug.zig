@@ -2,7 +2,6 @@ const std = @import("std");
 const Chunk = @import("Chunk.zig");
 const values = @import("values.zig");
 const Object = @import("Object.zig");
-const Manager = @import("memory.zig").Manager;
 
 const log = std.log.scoped(.debugger);
 
@@ -182,11 +181,8 @@ test "Simple dissassembly" {
     try chunk.write(0, 128);
     try chunk.write(9, 128);
 
-    var manager: Manager = undefined;
-    manager.init(std.testing.allocator);
-    defer manager.deinit();
-
-    var fun = try Object.Function.init(&manager);
+    var fun = try Object.Function.init(std.testing.allocator);
+    defer fun.object.deinit(std.testing.allocator);
     fun.upvalue_count = 4;
     var fun_name = Object.String.from("inner");
     fun.name = &fun_name;

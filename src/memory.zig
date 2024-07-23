@@ -22,10 +22,10 @@ pub const Manager = struct {
     objects: ?*Object = null,
     gray_stack: std.ArrayList(*Object),
 
-    pub fn init(manager: *Manager, allocator: std.mem.Allocator) void {
-        manager.arena = std.heap.ArenaAllocator.init(allocator);
-        manager.gray_stack = std.ArrayList(*Object).init(allocator);
-        manager.strings = StringPool.init(manager);
+    pub fn init(manager: *Manager, gpa: std.mem.Allocator) void {
+        manager.arena = std.heap.ArenaAllocator.init(gpa);
+        manager.gray_stack = std.ArrayList(*Object).init(gpa);
+        manager.strings = StringPool.init(manager.allocator());
         manager.bytes_allocated = 0;
         manager.times_collected = 0;
         manager.next_gc = 1024 * 1024;
@@ -46,61 +46,54 @@ pub const Manager = struct {
     }
 
     pub fn bookkeeping(manager: *Manager, size_t: usize, amount: usize) Error!void {
+        log.debug("allocating {d} bytes\n", .{size_t * amount});
         manager.bytes_allocated += size_t * amount;
         if (!manager.is_collecting and manager.bytes_allocated > manager.next_gc) {
             try manager.collect();
         }
     }
 
-    pub fn alloc(manager: *Manager, comptime T: type, size: usize) Error![]T {
-        try manager.bookkeeping(@sizeOf(T), size);
-        return manager.arena.allocator().alloc(T, size);
+    pub fn alloc(ctx: *anyopaque, n: usize, log2_ptr_align: u8, ra: usize) ?[*]u8 {
+        var manager: *Manager = @ptrCast(@alignCast(ctx));
+        const ptr_align = @as(usize, 1) << @as(std.mem.Allocator.Log2Align, @intCast(log2_ptr_align));
+
+        manager.bookkeeping(ptr_align, n) catch |e| {
+            log.err("Error running bookkeeping in alloc: {any}\n", .{e});
+        };
+        return manager.arena.allocator().vtable.alloc(&manager.arena, n, log2_ptr_align, ra);
     }
 
-    pub fn dupe(manager: *Manager, comptime T: type, original: []const T) Error![]T {
-        try manager.bookkeeping(@sizeOf(T), original.len);
-        return try manager.arena.allocator().dupe(T, original);
-    }
+    pub fn resize(ctx: *anyopaque, buf: []u8, log2_buf_align: u8, new_len: usize, ret_addr: usize) bool {
+        var manager: *Manager = @ptrCast(@alignCast(ctx));
 
-    pub fn realloc(manager: *Manager, memory: anytype, new_size: usize) !@TypeOf(memory) {
-        const item_size = @sizeOf(@typeInfo(@TypeOf(memory)).Slice.child);
-        const new_memory = try manager.arena.allocator().realloc(memory, new_size);
+        log.debug("{*} reallocating {d} bytes\n", .{ buf, new_len });
 
-        log.debug("{*} reallocating {d} for {s}\n", .{ memory, new_size, @typeName(@TypeOf(memory)) });
-
-        manager.bytes_allocated += (new_size * item_size) - (memory.len + item_size);
+        manager.bytes_allocated += new_len - buf.len;
         if (manager.bytes_allocated > manager.next_gc) {
-            manager.collect();
+            manager.collect() catch |e| {
+                log.err("Error while running collect in resize: {any}\n", .{e});
+            };
         }
 
-        return new_memory;
+        return manager.arena.allocator().vtable.resize(&manager.arena, buf, log2_buf_align, new_len, ret_addr);
     }
 
-    pub fn free(manager: *Manager, memory: anytype) void {
-        log.debug("{*} freeing {d} for {s}\n", .{ memory, memory.len, @typeName(@TypeOf(memory)) });
-        manager.arena.allocator().free(memory);
+    pub fn free(ctx: *anyopaque, buf: []u8, log2_buf_align: u8, ret_addr: usize) void {
+        var manager: *Manager = @ptrCast(@alignCast(ctx));
+        log.debug("{*} freeing {d} bytes\n", .{ buf, buf.len });
+        manager.bytes_allocated -= buf.len;
+        manager.arena.allocator().vtable.free(&manager.arena, buf, log2_buf_align, ret_addr);
+    }
 
-        const T: type = @typeInfo(@TypeOf(memory)).Pointer.child;
-        const item_size = @sizeOf(T);
-        manager.bookkeeping(item_size, memory.len) catch |e| {
-            log.err("Error in bookkeeping for free: {any}\n", .{e});
+    pub fn allocator(manager: *Manager) std.mem.Allocator {
+        return .{
+            .ptr = manager,
+            .vtable = &.{
+                .alloc = alloc,
+                .free = free,
+                .resize = resize,
+            },
         };
-    }
-
-    pub fn create(manager: *Manager, comptime T: type) Error!*T {
-        try manager.bookkeeping(@sizeOf(T), 1);
-        const ptr = try manager.arena.allocator().create(T);
-        log.debug("{*} allocating {d} for {s}\n", .{ ptr, @sizeOf(T), @typeName(T) });
-        return ptr;
-    }
-
-    pub fn destroy(manager: *Manager, ptr: anytype) void {
-        manager.arena.allocator().destroy(ptr);
-        manager.bytes_allocated -= @sizeOf(@typeInfo(@TypeOf(ptr)).Pointer.child);
-    }
-
-    pub fn inner(manager: *Manager) std.mem.Allocator {
-        return manager.arena.allocator();
     }
 
     pub fn copy(manager: *Manager, str: []const u8) !*Object {
@@ -111,7 +104,7 @@ pub const Manager = struct {
             return &i.object;
         }
         try manager.bookkeeping(@sizeOf(Object.String), 1);
-        const res = try Object.String.copy(str, manager);
+        const res = try Object.String.copy(str, manager.allocator());
         try manager.strings.set(res.as(Object.String), values.NIL_VAL);
         res.next = manager.objects;
         manager.objects = res;
@@ -119,16 +112,16 @@ pub const Manager = struct {
     }
 
     pub fn concat(manager: *Manager, a: []const u8, b: []const u8) !*Object {
-        var new_raw = try manager.alloc(u8, a.len + b.len);
+        var new_raw = try manager.allocator().alloc(u8, a.len + b.len);
         @memcpy(new_raw[0..a.len], a);
         @memcpy(new_raw[a.len..], b);
 
         if (manager.strings.find(new_raw)) |interned| {
-            manager.free(new_raw);
+            manager.allocator().free(new_raw);
             return &interned.object;
         } else {
             try manager.bookkeeping(@sizeOf(Object.String), 1);
-            const str = try Object.String.fromAlloc(new_raw, manager);
+            const str = try Object.String.fromAlloc(new_raw, manager.allocator());
             try manager.strings.set(str, values.NIL_VAL);
             const obj = &str.object;
             str.object.next = manager.objects;
@@ -148,52 +141,38 @@ pub const Manager = struct {
                 heap = obj.next;
             }
         }
-        const T = switch (object.tag) {
-            .string => Object.String,
-            .function => Object.Function,
-            .native => Object.Native,
-            .closure => Object.Closure,
-            .upvalue => Object.Upvalue,
-        };
-        manager.bytes_allocated -= @sizeOf(T);
-        object.deinit(manager);
+        object.deinit(manager.allocator());
     }
 
     pub fn allocObject(manager: *Manager, comptime T: type) !*Object {
-        try manager.bookkeeping(@sizeOf(T), 1);
-        manager.bytes_allocated += @sizeOf(T);
-        const res = try T.init(manager);
+        const res = try T.init(manager.allocator());
         res.object.next = manager.objects;
         manager.objects = &res.object;
         return &res.object;
     }
 
     pub fn allocClosure(manager: *Manager, function: *Object.Function) !*Object.Closure {
-        try manager.bookkeeping(@sizeOf(Object.Closure), 1);
-        const res = try Object.Closure.init(manager, function);
+        const res = try Object.Closure.init(manager.allocator(), function);
         res.object.next = manager.objects;
         manager.objects = &res.object;
         return res;
     }
 
     pub fn allocUpvalue(manager: *Manager, slot: *Value) !*Object.Upvalue {
-        try manager.bookkeeping(@sizeOf(Object.Upvalue), 1);
-        const res = try Object.Upvalue.init(manager, slot);
+        const res = try Object.Upvalue.init(manager.allocator(), slot);
         res.object.next = manager.objects;
         manager.objects = &res.object;
         return res;
     }
 
     pub fn allocClass(manager: *Manager, name: *Object.String) !*Object.Class {
-        try manager.bookkeeping(@sizeOf(Object.Class), 1);
-        const res = try Object.Class.init(manager, name);
+        const res = try Object.Class.init(manager.allocator(), name);
         res.object.next = manager.objects;
         manager.objects = &res.object;
         return res;
     }
     pub fn allocInstance(manager: *Manager, class: *Object.Class) !*Object.Instance {
-        try manager.bookkeeping(@sizeOf(Object.Instance), 1);
-        const res = try Object.Instance.init(manager, class);
+        const res = try Object.Instance.init(manager.allocator(), class);
         res.object.next = manager.objects;
         manager.objects = &res.object;
         return res;
@@ -216,7 +195,8 @@ pub const Manager = struct {
         manager.removeWhiteStrings();
 
         log.info("-- gc end\n", .{});
-        log.info("   collected {d} bytes (from {d} to {d}) next at {d}\n", .{ before - manager.bytes_allocated, before, manager.bytes_allocated, manager.next_gc });
+        log.info("   before {d}; after {d}\n", .{ before, manager.bytes_allocated });
+        log.info("   collected {d} bytes; next at {d}\n", .{ before - manager.bytes_allocated, manager.next_gc });
     }
 
     fn markRoots(manager: *Manager) !void {
@@ -240,7 +220,8 @@ pub const Manager = struct {
     }
 
     fn traceReferences(manager: *Manager) !void {
-        for (manager.gray_stack.items) |obj| {
+        while (manager.gray_stack.popOrNull()) |obj| {
+            log.info("Blackening object: {any}\n", .{obj});
             try manager.blackenObject(obj);
         }
     }
@@ -263,7 +244,7 @@ pub const Manager = struct {
                     manager.objects = object;
                 }
 
-                unreached.deinit(manager);
+                unreached.deinit(manager.allocator());
             }
         }
 

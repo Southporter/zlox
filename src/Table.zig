@@ -3,11 +3,10 @@ const Table = @This();
 const Object = @import("Object.zig");
 const values = @import("values.zig");
 const Value = values.Value;
-const Manager = @import("memory.zig").Manager;
 
 count: usize = 0,
 entries: []Entry,
-allocator: *Manager,
+allocator: std.mem.Allocator,
 
 pub const Entry = struct {
     key: ?*Object.String,
@@ -16,7 +15,7 @@ pub const Entry = struct {
 
 const MAX_LOAD: f32 = 0.75;
 
-pub fn init(allocator: *Manager) !Table {
+pub fn init(allocator: std.mem.Allocator) !Table {
     return .{
         .entries = try allocator.alloc(Entry, 0),
         .allocator = allocator,
@@ -124,16 +123,12 @@ fn grow(table: *Table) !void {
 }
 
 test "Basic set/get" {
-    var manager: Manager = undefined;
-    manager.init(std.testing.allocator);
-    defer manager.deinit();
-
     const key1_raw = "hello";
     const key2_raw = "world";
     var key1 = Object.String.from(key1_raw);
     var key2 = Object.String.from(key2_raw);
 
-    var table = try Table.init(&manager);
+    var table = try Table.init(std.testing.allocator);
     defer table.deinit();
 
     try std.testing.expect(try table.set(&key1, .{ .number = 5 }));

@@ -57,40 +57,40 @@ pub fn as(object: *Object, comptime T: type) *T {
     return @alignCast(@fieldParentPtr("object", object));
 }
 
-pub fn deinit(object: *Object, manager: *Manager) void {
+pub fn deinit(object: *Object, allocator: std.mem.Allocator) void {
     switch (object.tag) {
         .string => {
             const str = object.as(String);
-            str.deinit(manager);
-            manager.destroy(str);
+            str.deinit(allocator);
+            allocator.destroy(str);
         },
         .function => {
             const fun = object.as(Function);
             fun.deinit();
-            manager.destroy(fun);
+            allocator.destroy(fun);
         },
         .native => {
             const native = object.as(Native);
-            manager.destroy(native);
+            allocator.destroy(native);
         },
         .closure => {
             const closure = object.as(Closure);
-            closure.deinit(manager);
-            manager.destroy(closure);
+            closure.deinit(allocator);
+            allocator.destroy(closure);
         },
         .upvalue => {
             const upvalue = object.as(Upvalue);
-            manager.destroy(upvalue);
+            allocator.destroy(upvalue);
         },
         .class => {
             const class = object.as(Class);
-            class.deinit(manager);
-            manager.destroy(class);
+            class.deinit(allocator);
+            allocator.destroy(class);
         },
         .instance => {
             const inst = object.as(Instance);
-            inst.deinit(manager);
-            manager.destroy(inst);
+            inst.deinit(allocator);
+            allocator.destroy(inst);
         },
     }
 }
@@ -100,8 +100,8 @@ pub const String = struct {
     data: []const u8,
     hash: u32,
 
-    pub fn deinit(self: *String, manager: *Manager) void {
-        manager.free(self.data);
+    pub fn deinit(self: *String, allocator: std.mem.Allocator) void {
+        allocator.free(self.data);
     }
 
     pub fn format(string: String, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -121,7 +121,7 @@ pub const String = struct {
             .hash = hashString(raw),
         };
     }
-    pub fn fromAlloc(raw: []const u8, allocator: *Manager) !*String {
+    pub fn fromAlloc(raw: []const u8, allocator: std.mem.Allocator) !*String {
         var new = try allocator.create(String);
         new.object.tag = .string;
         new.object.next = null;
@@ -130,7 +130,7 @@ pub const String = struct {
         return new;
     }
 
-    pub fn copy(original: []const u8, allocator: *Manager) !*Object {
+    pub fn copy(original: []const u8, allocator: std.mem.Allocator) !*Object {
         var str = try allocator.create(String);
         str.object.tag = .string;
         str.object.next = null;
@@ -156,14 +156,14 @@ pub const Function = struct {
     chunk: Chunk,
     name: ?*String,
 
-    pub fn init(allocator: *Manager) !*Function {
+    pub fn init(allocator: std.mem.Allocator) !*Function {
         var fun = try allocator.create(Function);
         fun.object = .{
             .tag = .function,
         };
         fun.arity = 0;
         fun.upvalue_count = 0;
-        fun.chunk = try Chunk.init(allocator.inner());
+        fun.chunk = try Chunk.init(allocator);
         fun.name = null;
         return fun;
     }
@@ -190,7 +190,7 @@ pub const Native = struct {
     object: Object,
     function: NativeFn,
 
-    pub fn init(allocator: *Manager) !*Native {
+    pub fn init(allocator: std.mem.Allocator) !*Native {
         var native = try allocator.create(Native);
         native.object = .{
             .tag = .native,
@@ -212,7 +212,7 @@ pub const Closure = struct {
     function: *Function,
     upvalues: []?*Upvalue,
 
-    pub fn init(allocator: *Manager, function: *Function) !*Closure {
+    pub fn init(allocator: std.mem.Allocator, function: *Function) !*Closure {
         var closure = try allocator.create(Closure);
         closure.object = .{
             .tag = .closure,
@@ -225,7 +225,7 @@ pub const Closure = struct {
         return closure;
     }
 
-    pub fn deinit(closure: *Closure, allocator: *Manager) void {
+    pub fn deinit(closure: *Closure, allocator: std.mem.Allocator) void {
         allocator.free(closure.upvalues);
     }
 
@@ -245,7 +245,7 @@ pub const Upvalue = struct {
     closed: Value,
     next: ?*Upvalue = null,
 
-    pub fn init(allocator: *Manager, slot: *Value) !*Upvalue {
+    pub fn init(allocator: std.mem.Allocator, slot: *Value) !*Upvalue {
         var upvalue = try allocator.create(Upvalue);
         upvalue.object = .{ .tag = .upvalue };
         upvalue.location = slot;
@@ -268,14 +268,14 @@ pub const Class = struct {
     },
     name: *String,
 
-    pub fn init(allocator: *Manager, name: *String) !*Class {
+    pub fn init(allocator: std.mem.Allocator, name: *String) !*Class {
         var class = try allocator.create(Class);
         class.object = .{ .tag = .class };
         class.name = name;
         return class;
     }
 
-    pub fn deinit(class: *Class, allocator: *Manager) void {
+    pub fn deinit(class: *Class, allocator: std.mem.Allocator) void {
         _ = class;
         _ = allocator;
     }
@@ -295,7 +295,7 @@ pub const Instance = struct {
     class: *Class,
     fields: Table,
 
-    pub fn init(allocator: *Manager, class: *Class) !*Instance {
+    pub fn init(allocator: std.mem.Allocator, class: *Class) !*Instance {
         var instance = try allocator.create(Instance);
         instance.object = .{ .tag = .instance };
         instance.class = class;
@@ -304,7 +304,7 @@ pub const Instance = struct {
         return instance;
     }
 
-    pub fn deinit(instance: *Instance, _: *Manager) void {
+    pub fn deinit(instance: *Instance, _: std.mem.Allocator) void {
         instance.fields.deinit();
     }
 

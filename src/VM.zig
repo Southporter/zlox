@@ -73,7 +73,7 @@ const CallFrame = struct {
 
 pub fn init(vm: *VM, allocator: std.mem.Allocator) void {
     vm.manager.init(allocator);
-    vm.globals = Table.init(&vm.manager) catch unreachable;
+    vm.globals = Table.init(vm.manager.allocator()) catch unreachable;
     vm.stack_top = vm.stack[0..STACK_MAX].ptr;
     vm.openUpvalues = null;
     vm.frame_count = 0;
@@ -451,7 +451,7 @@ test "basic run" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(&vm.manager);
+    var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
     const index = try chunk.addConstant(.{ .number = 3.14 });
     try chunk.writeOp(.constant, 0);
@@ -468,7 +468,7 @@ test "basic arithmatic" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(&vm.manager);
+    var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
 
     const pi = 3.1415926;
@@ -499,7 +499,7 @@ test "boolean logic" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(&vm.manager);
+    var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
 
     try chunk.writeOp(.true, 0);
@@ -513,7 +513,7 @@ test "Comparison: less" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(&vm.manager);
+    var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -536,7 +536,7 @@ test "Comparison: greater" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(&vm.manager);
+    var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
 
     const two = 2.0;
@@ -559,7 +559,7 @@ test "Equality" {
     var vm: VM = undefined;
     vm.init(std.testing.allocator);
     defer vm.deinit();
-    var function = try Object.Function.init(&vm.manager);
+    var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
 
     const two = 2.0;

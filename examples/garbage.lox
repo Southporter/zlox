@@ -2,9 +2,15 @@ var preamble = "Hello";
 print(preamble);
 print(" forever");
 
-for (var i = 0; i < 100000; i = i + 1) {
-  var message = " " + toString(i) + " and forever";
-  print(message);
+
+for (var i = 0; i <100000; i = i + 1) {
+  fun printMessage() {
+    var message = " " + toString(i) + " and forever";
+    var garbage = preamble + toString(i) + " some garbage";
+    print message;
+
+  }
+  printMessage();
 }
 
-print("\n");
+println("");
