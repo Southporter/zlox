@@ -117,5 +117,8 @@ pub fn printObject(object: *Object, printer: Printer) void {
         .instance => {
             printer("{s} instance", .{object.as(Object.Instance).class.name});
         },
+        .bound_method => {
+            printObject(&object.as(Object.BoundMethod).method.function.object, printer);
+        },
     }
 }

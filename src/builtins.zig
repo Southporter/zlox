@@ -16,8 +16,7 @@ pub fn clock(arg_count: u8, _: [*]Value, _: *Manager) NativeError!Value {
 pub fn println(arg_count: u8, values: [*]Value, _: *Manager) NativeError!Value {
     std.debug.assert(arg_count == 1);
     const val = values[0];
-    vals.print(val, std.debug.print);
-    std.debug.print("\n", .{});
+    std.debug.print("{any}\n", .{val});
     return vals.NIL_VAL;
 }
 

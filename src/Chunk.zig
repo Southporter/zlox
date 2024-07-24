@@ -14,16 +14,18 @@ pub const Opcode = enum(u8) {
     jump_if_false,
     loop,
     call,
-    closure,
-    class, //0x08
+    invoke,
+    closure, //0x08
+    class,
+    method,
     constant,
     define_global,
     get_global,
     set_global,
-    get_local,
+    get_local, // 0x10
     set_local,
     get_upvalue,
-    set_upvalue, // 0x10
+    set_upvalue,
     close_upvalue,
     get_property,
     set_property,

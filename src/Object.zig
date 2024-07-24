@@ -15,6 +15,7 @@ pub const ObjectType = enum {
     upvalue,
     class,
     instance,
+    bound_method,
 };
 
 tag: ObjectType,
@@ -44,16 +45,14 @@ pub fn equal(a: *Object, b: *Object) bool {
         .native => {
             return a.as(Native).function == b.as(Native).function;
         },
-        .closure, .class, .instance => {
+        .closure, .class, .instance, .bound_method => {
             return a == b;
         },
     }
 }
 
 pub fn as(object: *Object, comptime T: type) *T {
-    const tag_name = @tagName(object.tag);
-    const type_name = @typeName(T);
-    assert(std.ascii.eqlIgnoreCase(tag_name, type_name[type_name.len - tag_name.len ..]));
+    assert(object.tag == T.tag());
     return @alignCast(@fieldParentPtr("object", object));
 }
 
@@ -92,6 +91,11 @@ pub fn deinit(object: *Object, allocator: std.mem.Allocator) void {
             inst.deinit(allocator);
             allocator.destroy(inst);
         },
+        .bound_method => {
+            const bound = object.as(BoundMethod);
+            bound.deinit(allocator);
+            allocator.destroy(bound);
+        },
     }
 }
 
@@ -99,6 +103,10 @@ pub const String = struct {
     object: Object,
     data: []const u8,
     hash: u32,
+
+    pub fn tag() ObjectType {
+        return .string;
+    }
 
     pub fn deinit(self: *String, allocator: std.mem.Allocator) void {
         allocator.free(self.data);
@@ -108,7 +116,7 @@ pub const String = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("String{{has_next: {}, is_marked: {}, hash: {d}, data: {s} }}", .{ string.object.next != null, string.object.is_marked, string.hash, string.data });
+        try writer.print("{s}", .{string.data});
     }
 
     pub fn from(raw: []const u8) String {
@@ -156,6 +164,9 @@ pub const Function = struct {
     chunk: Chunk,
     name: ?*String,
 
+    pub fn tag() ObjectType {
+        return .function;
+    }
     pub fn init(allocator: std.mem.Allocator) !*Function {
         var fun = try allocator.create(Function);
         fun.object = .{
@@ -190,6 +201,10 @@ pub const Native = struct {
     object: Object,
     function: NativeFn,
 
+    pub fn tag() ObjectType {
+        return .native;
+    }
+
     pub fn init(allocator: std.mem.Allocator) !*Native {
         var native = try allocator.create(Native);
         native.object = .{
@@ -211,6 +226,10 @@ pub const Closure = struct {
     object: Object,
     function: *Function,
     upvalues: []?*Upvalue,
+
+    pub fn tag() ObjectType {
+        return .closure;
+    }
 
     pub fn init(allocator: std.mem.Allocator, function: *Function) !*Closure {
         var closure = try allocator.create(Closure);
@@ -245,6 +264,9 @@ pub const Upvalue = struct {
     closed: Value,
     next: ?*Upvalue = null,
 
+    pub fn tag() ObjectType {
+        return .upvalue;
+    }
     pub fn init(allocator: std.mem.Allocator, slot: *Value) !*Upvalue {
         var upvalue = try allocator.create(Upvalue);
         upvalue.object = .{ .tag = .upvalue };
@@ -267,17 +289,22 @@ pub const Class = struct {
         .tag = .class,
     },
     name: *String,
+    methods: Table,
+    pub fn tag() ObjectType {
+        return .class;
+    }
 
     pub fn init(allocator: std.mem.Allocator, name: *String) !*Class {
         var class = try allocator.create(Class);
         class.object = .{ .tag = .class };
         class.name = name;
+        class.methods = try Table.init(allocator);
         return class;
     }
 
     pub fn deinit(class: *Class, allocator: std.mem.Allocator) void {
-        _ = class;
         _ = allocator;
+        class.methods.deinit();
     }
 
     pub fn format(class: Class, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
@@ -294,6 +321,10 @@ pub const Instance = struct {
     },
     class: *Class,
     fields: Table,
+
+    pub fn tag() ObjectType {
+        return .instance;
+    }
 
     pub fn init(allocator: std.mem.Allocator, class: *Class) !*Instance {
         var instance = try allocator.create(Instance);
@@ -314,4 +345,27 @@ pub const Instance = struct {
 
         try writer.print("{s} instance {{ }}", .{instance.class.name.data});
     }
+};
+
+pub const BoundMethod = struct {
+    object: Object = .{
+        .tag = .bound_method,
+    },
+    receiver: Value,
+    method: *Closure,
+
+    pub fn tag() ObjectType {
+        return .bound_method;
+    }
+
+    pub fn init(allocator: std.mem.Allocator, receiver: Value, method: *Closure) !*BoundMethod {
+        var bound = try allocator.create(BoundMethod);
+        bound.object = .{ .tag = .bound_method };
+        bound.receiver = receiver;
+        bound.method = method;
+
+        return bound;
+    }
+
+    pub fn deinit(_: *BoundMethod, _: std.mem.Allocator) void {}
 };

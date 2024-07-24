@@ -50,8 +50,10 @@ pub fn disassembleInstruction(chunk: *Chunk, offset: usize, writer: anytype) !us
         .jump_if_false => jumpInstruction("OP_JUMP_IF_FALSE", 1, chunk, offset, writer),
         .loop => jumpInstruction("OP_LOOP", -1, chunk, offset, writer),
         .call => byteInstruction("OP_CALL", chunk, offset, writer),
+        .invoke => invokeInstruction("OP_INVOKE", chunk, offset, writer),
         .closure => closureInstruction(chunk, offset, writer),
         .class => constantInstruction("OP_CLASS", chunk, offset, writer),
+        .method => constantInstruction("OP_METHOD", chunk, offset, writer),
         .pop => simpleInstruction("OP_POP", offset, writer),
         .true => simpleInstruction("OP_TRUE", offset, writer),
         .false => simpleInstruction("OP_FALSE", offset, writer),
@@ -82,6 +84,16 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: a
     return offset + 2;
 }
 
+fn invokeInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: anytype) !usize {
+    const constant_index = chunk.code[offset + 1];
+    const constant = chunk.constants.items[constant_index];
+    const arg_count = chunk.code[offset + 2];
+    try writer.print("{s:<16} ({d} args) {d:>4}", .{ name, arg_count, constant_index });
+    try printValue(constant, writer);
+    _ = try writer.write("\n");
+    return offset + 3;
+}
+
 fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
     var new_offset = offset;
     const index = chunk.code[offset + 1];
@@ -107,26 +119,33 @@ pub fn printValue(constant: values.Value, writer: anytype) !void {
         .number => |val| try writer.print("{any}", .{val}),
         .boolean => |val| try writer.print("{}", .{val}),
         .nil => _ = try writer.write("nil"),
-        .object => |obj| {
-            switch (obj.tag) {
-                .string => try writer.print("\"{s}\"", .{obj.as(Object.String).data}),
-                .function => {
-                    const fun = obj.as(Object.Function);
-                    if (fun.name) |n| {
-                        try writer.print("<fn {s}>", .{n.data});
-                    } else {
-                        _ = try writer.write("<script>");
-                    }
-                },
-                .closure => unreachable,
-                .native => {
-                    _ = try writer.write("<fn native>");
-                },
-                .upvalue => _ = try writer.write("<upvalue>"),
-                .class => try writer.print("{s}", .{obj.as(Object.Class).name}),
-                .instance => try writer.print("{s} instance", .{obj.as(Object.Instance).class.name}),
+        .object => |obj| try printObject(obj, writer),
+    }
+}
+
+fn printObject(obj: *Object, writer: anytype) !void {
+    switch (obj.tag) {
+        .string => try writer.print("\"{s}\"", .{obj.as(Object.String).data}),
+        .function => {
+            const fun = obj.as(Object.Function);
+            if (fun.name) |n| {
+                try writer.print("<fn {s}>", .{n.data});
+            } else {
+                _ = try writer.write("<script>");
             }
         },
+        .closure => {
+            _ = try writer.write("<closure ");
+            try printObject(&obj.as(Object.Closure).function.object, writer);
+            _ = try writer.write(" >");
+        },
+        .native => {
+            _ = try writer.write("<fn native>");
+        },
+        .upvalue => _ = try writer.write("<upvalue>"),
+        .class => try writer.print("{s}", .{obj.as(Object.Class).name}),
+        .instance => try writer.print("{s} instance", .{obj.as(Object.Instance).class.name}),
+        .bound_method => try printObject(&obj.as(Object.BoundMethod).method.function.object, writer),
     }
 }
 

@@ -25,6 +25,7 @@ openUpvalues: ?*Object.Upvalue = null,
 globals: Table = undefined,
 frames: [FRAMES_MAX]CallFrame = undefined,
 frame_count: usize = 0,
+init_string: *Object.String,
 
 const CallFrame = struct {
     closure: *Object.Closure,
@@ -77,6 +78,8 @@ pub fn init(vm: *VM, allocator: std.mem.Allocator) void {
     vm.stack_top = vm.stack[0..STACK_MAX].ptr;
     vm.openUpvalues = null;
     vm.frame_count = 0;
+    const obj = vm.manager.copy("init") catch unreachable;
+    vm.init_string = obj.as(Object.String);
 }
 
 pub fn addNatives(vm: *VM) !void {
@@ -110,9 +113,7 @@ pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
     const closure = try vm.manager.allocClosure(function);
     _ = vm.pop();
     vm.push(.{ .object = &closure.object });
-    if (!vm.call(closure, 0)) {
-        return error.RuntimeError;
-    }
+    try vm.call(closure, 0);
     return vm.run();
 }
 
@@ -121,7 +122,7 @@ pub fn run(vm: *VM) Error!Value {
 
     try debug.disassembleChunk(frame.chunk(), frame.getName(), debug.Writer);
     while (true) {
-        // vm.printStack(log.debug);
+        vm.printStack(log.debug);
         _ = debug.disassembleInstruction(frame.chunk(), @intFromPtr(frame.ip) - @intFromPtr(frame.chunk().code.ptr), debug.Writer) catch {};
         const op: Chunk.Opcode = @enumFromInt(frame.readByte());
         switch (op) {
@@ -151,9 +152,13 @@ pub fn run(vm: *VM) Error!Value {
             },
             .call => {
                 const arg_count = frame.readByte();
-                if (!try vm.callValue(vm.peek(arg_count), arg_count)) {
-                    return error.RuntimeError;
-                }
+                try vm.callValue(vm.peek(arg_count), arg_count);
+                frame = &vm.frames[vm.frame_count - 1];
+            },
+            .invoke => {
+                const method_name = frame.readString();
+                const arg_count = frame.readByte();
+                try vm.invoke(method_name, arg_count);
                 frame = &vm.frames[vm.frame_count - 1];
             },
             .closure => {
@@ -174,6 +179,9 @@ pub fn run(vm: *VM) Error!Value {
                 const name = frame.readConstant().object.as(Object.String);
                 const class = try vm.manager.allocClass(name);
                 vm.push(.{ .object = &class.object });
+            },
+            .method => {
+                try vm.defineMethod(frame.readString());
             },
             .constant => {
                 vm.push(frame.readConstant());
@@ -226,7 +234,7 @@ pub fn run(vm: *VM) Error!Value {
             },
             .get_property => {
                 if (!vm.peek(0).isInstance()) {
-                    vm.runtimeError("Only instances have properties.", .{});
+                    vm.runtimeError("Only instances have properties. {any}\n", .{vm.peek(0)});
                     return error.RuntimeError;
                 }
                 const inst = vm.peek(0).object.as(Object.Instance);
@@ -234,13 +242,15 @@ pub fn run(vm: *VM) Error!Value {
                 _ = vm.pop(); // Instance
                 if (inst.fields.get(name)) |val| {
                     vm.push(val);
+                } else if (try vm.bindMethod(inst.class, name)) |val| {
+                    vm.push(val);
                 } else {
                     vm.push(values.NIL_VAL);
                 }
             },
             .set_property => {
                 if (!vm.peek(1).isInstance()) {
-                    vm.runtimeError("Only instances have properties.", .{});
+                    vm.runtimeError("Only instances have properties.\n", .{});
                     return error.RuntimeError;
                 }
                 const inst = vm.peek(1).object.as(Object.Instance);
@@ -325,7 +335,7 @@ fn get(vm: *VM, distance: usize) *Value {
     return &value_ptr[0];
 }
 
-fn callValue(vm: *VM, callee: Value, arg_count: u8) !bool {
+fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
     if (std.meta.activeTag(callee) == .object) {
         switch (callee.object.tag) {
             .closure => return vm.call(callee.object.as(Object.Closure), arg_count),
@@ -335,39 +345,86 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !bool {
                 const result = try native.function(arg_count, args, &vm.manager);
                 vm.stack_top -= arg_count + 1;
                 vm.push(result);
-                return true;
+                return;
             },
             .class => {
                 const class = callee.object.as(Object.Class);
                 const instance = try vm.manager.allocInstance(class);
-                var top = vm.stack_top;
-                top -= arg_count;
-                top -= 1;
-                top[0] = .{ .object = &instance.object };
-                return true;
+                var slot = vm.stack_top - arg_count - 1;
+                slot[0] = .{ .object = &instance.object };
+                vm.printStack(log.debug);
+
+                if (class.methods.get(vm.init_string)) |val| {
+                    return vm.call(val.object.as(Object.Closure), arg_count);
+                } else if (arg_count != 0) {
+                    // Empty constructor has too many args
+                    vm.runtimeError("Constructor expected 0 arguments but got {d}\n", .{arg_count});
+                    return error.RuntimeError;
+                }
+                return;
+            },
+            .bound_method => {
+                const bound = callee.object.as(Object.BoundMethod);
+                const slot = vm.stack_top - arg_count - 1;
+                slot[0] = bound.receiver;
+                return vm.call(bound.method, arg_count);
             },
             else => {},
         }
     }
     vm.runtimeError("Can only call functions and classes.", .{});
-    return false;
+    return error.RuntimeError;
 }
 
-fn call(vm: *VM, closure: *Object.Closure, arg_count: u8) bool {
+fn invokeFromClass(vm: *VM, class: *Object.Class, name: *Object.String, arg_count: u8) !void {
+    if (class.methods.get(name)) |method| {
+        return vm.call(method.object.as(Object.Closure), arg_count);
+    } else {
+        vm.runtimeError("Undefined property: '{s}'\n", .{name.data});
+        return error.RuntimeError;
+    }
+}
+
+fn invoke(vm: *VM, name: *Object.String, arg_count: u8) !void {
+    const receiver = vm.peek(arg_count);
+    if (!receiver.isInstance()) {
+        vm.runtimeError("Only instances have methods.\n", .{});
+        return error.RuntimeError;
+    }
+    const inst = receiver.object.as(Object.Instance);
+
+    if (inst.fields.get(name)) |val| {
+        var slot = vm.stack_top - arg_count - 1;
+        slot[0] = val;
+        return vm.callValue(val, arg_count);
+    }
+    return vm.invokeFromClass(inst.class, name, arg_count);
+}
+
+fn bindMethod(vm: *VM, class: *Object.Class, name: *Object.String) !?Value {
+    if (class.methods.get(name)) |val| {
+        const bound = try vm.manager.allocBoundMethod(vm.peek(0), val.object.as(Object.Closure));
+        _ = vm.pop();
+        return .{ .object = &bound.object };
+    } else {
+        return null;
+    }
+}
+
+fn call(vm: *VM, closure: *Object.Closure, arg_count: u8) !void {
     if (arg_count != closure.function.arity) {
         vm.runtimeError("Expected {d} arguments but got {d}.\n", .{ closure.function.arity, arg_count });
-        return false;
+        return error.RuntimeError;
     }
     if (vm.frame_count == FRAMES_MAX) {
         vm.runtimeError("Stack overflow.\n", .{});
-        return false;
+        return error.RuntimeError;
     }
     var frame = &vm.frames[vm.frame_count];
     vm.frame_count += 1;
     frame.closure = closure;
     frame.ip = closure.function.chunk.code.ptr;
     frame.slots = vm.stack_top - 1 - arg_count;
-    return true;
 }
 
 fn captureUpvalue(vm: *VM, local: *Value) !*Object.Upvalue {
@@ -399,6 +456,13 @@ fn closeUpvalues(vm: *VM, last: *Value) void {
 
         vm.openUpvalues = upvalue.next;
     }
+}
+
+fn defineMethod(vm: *VM, name: *Object.String) !void {
+    const method = vm.peek(0);
+    const class = vm.peek(1).object.as(Object.Class);
+    _ = try class.methods.set(name, method);
+    _ = vm.pop();
 }
 
 fn concatenate(vm: *VM) !void {
@@ -840,4 +904,61 @@ test "Chapter 27: Undefined properties" {
 
     const res = vm.interpret(input);
     try std.testing.expectEqual(values.NIL_VAL, res);
+}
+
+test "Chapter 28: Methods" {
+    const input =
+        \\ class Test {
+        \\   run() {
+        \\      return "success";
+        \\   }
+        \\
+        \\   runCase(i) {
+        \\       print i;
+        \\       return run();
+        \\   }
+        \\
+        \\   case(i) {
+        \\      return runCase(i);
+        \\   }
+        \\ }
+        \\
+        \\ var test = Test();
+        \\ test.status = test.run();
+        \\
+        \\ return test.status;
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = try vm.interpret(input);
+    try std.testing.expectEqualStrings("success", res.object.as(Object.String).data);
+}
+
+test "Chapter 28: Invoking fields" {
+    const input =
+        \\ class Oops {
+        \\   init() {
+        \\     fun f() {
+        \\       print "not a method";
+        \\       return "not a method";
+        \\     }
+        \\
+        \\     this.field = f;
+        \\   }
+        \\ }
+        \\
+        \\ var oops = Oops();
+        \\ return oops.field();
+        \\
+    ;
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = try vm.interpret(input);
+    try std.testing.expectEqualStrings("not a method", res.object.as(Object.String).data);
 }

@@ -178,6 +178,13 @@ pub const Manager = struct {
         return res;
     }
 
+    pub fn allocBoundMethod(manager: *Manager, receiver: Value, method: *Object.Closure) !*Object.BoundMethod {
+        const res = try Object.BoundMethod.init(manager.allocator(), receiver, method);
+        res.object.next = manager.objects;
+        manager.objects = &res.object;
+        return res;
+    }
+
     pub fn collect(manager: *Manager) !void {
         manager.is_collecting = true;
         defer manager.is_collecting = false;
@@ -206,6 +213,7 @@ pub const Manager = struct {
             try manager.markValue(ptr[0]);
         }
 
+        try manager.markObject(&vm.init_string.object);
         try manager.markTable(&vm.globals);
         try manager.markCompilerRoots(&vm.root_compiler);
 
@@ -283,6 +291,7 @@ pub const Manager = struct {
             .class => {
                 const class = object.as(Object.Class);
                 try manager.markObject(&class.name.object);
+                try manager.markTable(&class.methods);
             },
             .closure => {
                 const closure = object.as(Object.Closure);
@@ -304,6 +313,11 @@ pub const Manager = struct {
                 const inst = object.as(Object.Instance);
                 try manager.markObject(&inst.class.object);
                 try manager.markTable(&inst.fields);
+            },
+            .bound_method => {
+                const bound = object.as(Object.BoundMethod);
+                try manager.markValue(bound.receiver);
+                try manager.markObject(&bound.method.object);
             },
             .upvalue => try manager.markValue(object.as(Object.Upvalue).closed),
             .native, .string => {},

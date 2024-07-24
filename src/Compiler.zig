@@ -27,7 +27,13 @@ const Upvalue = struct {
 
 const FunctionType = enum {
     function,
+    initializer,
+    method,
     script,
+};
+
+const ClassCompiler = struct {
+    enclosing: ?*ClassCompiler = null,
 };
 
 manager: *Manager,
@@ -46,6 +52,7 @@ upvalues: [MAX_UPVALUES]Upvalue = undefined,
 scope_depth: isize = 0,
 enclosing: ?*Compiler = null,
 inner: ?*Compiler = null,
+current_class: ?*ClassCompiler = null,
 
 const Precedence = enum {
     none,
@@ -178,6 +185,9 @@ const rules = blk: {
         .infix = or_,
         .precedence = .@"or",
     });
+    map.set(.this, ParseRule{
+        .prefix = this,
+    });
 
     break :blk map;
 };
@@ -223,7 +233,11 @@ pub fn init(manager: *Manager, function_type: FunctionType) !Compiler {
         .function = fun.as(Object.Function),
         .function_type = function_type,
         .locals = [1]Local{.{
-            .name = Scanner.Token{ .tag = .identifier, .raw = "", .line = 0 },
+            .name = Scanner.Token{
+                .tag = .identifier,
+                .raw = if (function_type != .function) "this" else "",
+                .line = 0,
+            },
             .depth = 0,
             .is_captured = false,
         }} ++ [1]Local{.{ .name = Scanner.Token{ .tag = .@"error", .raw = "", .line = 0 }, .depth = -1, .is_captured = false }} ** (MAX_LOCALS - 1),
@@ -277,7 +291,11 @@ fn emitOpOp(compiler: *Compiler, op: Chunk.Opcode, op2: Chunk.Opcode) !void {
     try compiler.emitOp(op2);
 }
 fn emitReturn(compiler: *Compiler) !void {
-    try compiler.emitOp(.nil);
+    if (compiler.function_type == .initializer) {
+        try compiler.emitOpAndArg(.get_local, 0);
+    } else {
+        try compiler.emitOp(.nil);
+    }
     try compiler.emitOp(.@"return");
 }
 
@@ -371,14 +389,27 @@ fn funDeclaration(compiler: *Compiler) CompileError!void {
 
 fn classDeclaration(compiler: *Compiler) CompileError!void {
     compiler.parser.consume(.identifier, "Expect class name.");
+    const class_name = compiler.parser.previous.?;
     const name = try compiler.identifierConstant();
     compiler.declareVariable();
 
     try compiler.emitOpAndArg(.class, name);
     try compiler.defineVariable(name);
 
+    var classCompiler = ClassCompiler{
+        .enclosing = compiler.current_class,
+    };
+    compiler.current_class = &classCompiler;
+    defer compiler.current_class = classCompiler.enclosing;
+
+    try compiler.namedVariable(class_name, false);
     compiler.parser.consume(.left_brace, "Expect '{' before class body.");
+
+    while (!compiler.parser.check(.right_brace) and !compiler.parser.check(.eof)) {
+        try compiler.method();
+    }
     compiler.parser.consume(.right_brace, "Expect '}' after class body.");
+    try compiler.emitOp(.pop);
 }
 
 fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
@@ -489,10 +520,9 @@ fn addUpvalue(compiler: *Compiler, index: u8, is_local: bool) u8 {
     return @intCast(upvalue_count);
 }
 
-fn namedVariable(compiler: *Compiler, can_assign: bool) CompileError!void {
+fn namedVariable(compiler: *Compiler, name: Scanner.Token, can_assign: bool) CompileError!void {
     var getOp = Chunk.Opcode.get_global;
     var setOp = Chunk.Opcode.set_global;
-    const name = compiler.parser.previous.?;
     var op_arg = compiler.resolveLocal(name);
     if (op_arg != -1) {
         setOp = .set_local;
@@ -643,6 +673,9 @@ fn returnStatement(compiler: *Compiler) CompileError!void {
     if (compiler.parser.match(.semicolon)) {
         try compiler.emitReturn();
     } else {
+        if (compiler.function_type == .initializer) {
+            compiler.parser.err("Cannot return a value from an initializer.");
+        }
         try compiler.expression();
         compiler.parser.consume(.semicolon, "Expect ';' after value.");
         return compiler.emitOp(.@"return");
@@ -670,7 +703,16 @@ fn string(compiler: *Compiler, _: bool) CompileError!void {
 
 fn variable(compiler: *Compiler, can_assign: bool) CompileError!void {
     log.debug("Parsing variable identifier: can assign? {}\n", .{can_assign});
-    try compiler.namedVariable(can_assign);
+    const name = compiler.parser.previous.?;
+    try compiler.namedVariable(name, can_assign);
+}
+
+fn this(compiler: *Compiler, _: bool) CompileError!void {
+    if (compiler.current_class == null) {
+        compiler.parser.err("Can't use 'this' outside of a class");
+        return;
+    }
+    try compiler.variable(false);
 }
 
 fn call(compiler: *Compiler, _: bool) CompileError!void {
@@ -685,6 +727,10 @@ fn dot(compiler: *Compiler, can_assign: bool) CompileError!void {
     if (can_assign and compiler.parser.match(.equal)) {
         try compiler.expression();
         try compiler.emitOpAndArg(.set_property, name);
+    } else if (compiler.parser.match(.left_paren)) {
+        const arg_count = try compiler.argList();
+        try compiler.emitOpAndArg(.invoke, name);
+        try compiler.emitByte(arg_count);
     } else {
         try compiler.emitOpAndArg(.get_property, name);
     }
@@ -730,6 +776,7 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
     fun_compiler.enclosing = compiler;
     compiler.inner = &fun_compiler;
     fun_compiler.function.name = (try compiler.copyIdentifier()).as(Object.String);
+    fun_compiler.current_class = compiler.current_class;
     fun_compiler.beginScope();
     fun_compiler.parser = compiler.parser;
     fun_compiler.parser.consume(.left_paren, "Expect '(' after function name.");
@@ -749,6 +796,17 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
         try compiler.emitByte(upvalue.index);
     }
     compiler.inner = null;
+}
+
+fn method(compiler: *Compiler) !void {
+    compiler.parser.consume(.identifier, "Expected method name.");
+    const name = try compiler.identifierConstant();
+    const name_raw = compiler.parser.previous.?.raw;
+
+    const method_type: FunctionType = if (std.mem.eql(u8, "init", name_raw)) .initializer else .method;
+
+    try compiler.compileFunction(method_type);
+    try compiler.emitOpAndArg(.method, name);
 }
 
 fn copyString(compiler: *Compiler) !*Object {
@@ -1324,7 +1382,7 @@ test "Chapter 25: closure upvalues" {
 
 }
 
-test "Chapter 27: classes" {
+test "Chapter 27: classes and instances" {
     const source =
         \\ class Test {}
         \\
@@ -1345,6 +1403,8 @@ test "Chapter 27: classes" {
         @intFromEnum(Chunk.Opcode.class), 0,
         @intFromEnum(Chunk.Opcode.define_global), 0,
         @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.get_global), 0,
         @intFromEnum(Chunk.Opcode.call), 0,
         @intFromEnum(Chunk.Opcode.define_global), 1,
         @intFromEnum(Chunk.Opcode.get_global), 1,
@@ -1356,4 +1416,123 @@ test "Chapter 27: classes" {
         // zig fmt: on
     }, script.chunk.code[0..script.chunk.count]);
 
+}
+test "Chapter 28: methods" {
+    const source =
+        \\ class Test {
+        \\    run() {}
+        \\ }
+        \\
+        \\ {
+        \\    class Local{
+        \\       scope() {
+        \\          return 1;
+        \\       }
+        \\    }
+        \\ }
+        \\
+    ;
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var compiler = try Compiler.init(&manager, .script);
+
+    const script = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.class), 0,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.closure), 2,
+        @intFromEnum(Chunk.Opcode.method), 1,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.class), 3,
+        @intFromEnum(Chunk.Opcode.get_local), 1,
+        @intFromEnum(Chunk.Opcode.closure), 5,
+        @intFromEnum(Chunk.Opcode.method), 4,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, script.chunk.code[0..script.chunk.count]);
+
+}
+
+test "Chapter 28: initializer" {
+    const source =
+        \\ class CoffeeMaker {
+        \\   init(coffee) {
+        \\     this.coffee = coffee;
+        \\   }
+        \\
+        \\   brew() {
+        \\     print "Enjoy your cup of " + this.coffee;
+\\
+        \\     // No reusing the grounds!
+        \\     this.coffee = nil;
+        \\   }
+        \\ }
+\\
+        \\ var maker = CoffeeMaker("coffee and chicory");
+        \\ maker.brew();
+        \\
+    ;
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var compiler = try Compiler.init(&manager, .script);
+
+    const script = try compiler.compile(source);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.class), 0,
+        @intFromEnum(Chunk.Opcode.define_global), 0,
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.closure), 2,
+        @intFromEnum(Chunk.Opcode.method), 1,
+        @intFromEnum(Chunk.Opcode.closure), 4,
+        @intFromEnum(Chunk.Opcode.method), 3,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.get_global), 0,
+        @intFromEnum(Chunk.Opcode.constant), 6,
+        @intFromEnum(Chunk.Opcode.call), 1,
+        @intFromEnum(Chunk.Opcode.define_global), 5,
+        @intFromEnum(Chunk.Opcode.get_global), 5,
+        @intFromEnum(Chunk.Opcode.invoke), 3,
+        @intFromEnum(Chunk.Opcode.@"return"),
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, script.chunk.code[0..script.chunk.count]);
+    const init_fun = script.chunk.constants.items[2].object.as(Object.Function);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.get_local), 0,
+        @intFromEnum(Chunk.Opcode.get_local), 1,
+        @intFromEnum(Chunk.Opcode.set_property), 0,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.get_local), 0,
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, init_fun.chunk.code[0..init_fun.chunk.count]);
+    const brew_fun = script.chunk.constants.items[4].object.as(Object.Function);
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        // zig fmt: off
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.get_local), 0,
+        @intFromEnum(Chunk.Opcode.get_property), 1,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.get_local), 0,
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.set_property), 1,
+        @intFromEnum(Chunk.Opcode.pop),
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+        // zig fmt: on
+    }, brew_fun.chunk.code[0..brew_fun.chunk.count]);
 }
