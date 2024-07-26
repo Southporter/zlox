@@ -34,7 +34,16 @@ const FunctionType = enum {
 
 const ClassCompiler = struct {
     enclosing: ?*ClassCompiler = null,
+    has_superclass: bool = false,
 };
+
+fn syntheticToken(name: []const u8) Scanner.Token {
+    return .{
+        .line = 0,
+        .raw = name,
+        .tag = .super,
+    };
+}
 
 manager: *Manager,
 parser: Parser = undefined,
@@ -187,6 +196,9 @@ const rules = blk: {
     });
     map.set(.this, ParseRule{
         .prefix = this,
+    });
+    map.set(.super, ParseRule{
+        .prefix = super,
     });
 
     break :blk map;
@@ -389,18 +401,34 @@ fn funDeclaration(compiler: *Compiler) CompileError!void {
 
 fn classDeclaration(compiler: *Compiler) CompileError!void {
     compiler.parser.consume(.identifier, "Expect class name.");
-    const class_name = compiler.parser.previous.?;
-    const name = try compiler.identifierConstant();
+    const class_name: Scanner.Token = compiler.parser.previous.?;
+    const name = try compiler.identifierConstant(class_name);
     compiler.declareVariable();
 
     try compiler.emitOpAndArg(.class, name);
     try compiler.defineVariable(name);
 
-    var classCompiler = ClassCompiler{
+    var class_compiler = ClassCompiler{
         .enclosing = compiler.current_class,
     };
-    compiler.current_class = &classCompiler;
-    defer compiler.current_class = classCompiler.enclosing;
+    compiler.current_class = &class_compiler;
+    defer compiler.current_class = class_compiler.enclosing;
+
+    if (compiler.parser.match(.less)) {
+        compiler.parser.consume(.identifier, "Expect superclass name.");
+        try compiler.variable(false);
+
+        if (std.mem.eql(u8, class_name.raw, compiler.parser.previous.?.raw)) {
+            compiler.parser.err("A class cannot inherit from itself.");
+        }
+
+        compiler.beginScope();
+        compiler.addLocal(syntheticToken("super"));
+        try compiler.defineVariable(0);
+        try compiler.namedVariable(class_name, false);
+        try compiler.emitOp(.inherit);
+        class_compiler.has_superclass = true;
+    }
 
     try compiler.namedVariable(class_name, false);
     compiler.parser.consume(.left_brace, "Expect '{' before class body.");
@@ -410,18 +438,23 @@ fn classDeclaration(compiler: *Compiler) CompileError!void {
     }
     compiler.parser.consume(.right_brace, "Expect '}' after class body.");
     try compiler.emitOp(.pop);
+
+    if (class_compiler.has_superclass) {
+        try compiler.endScope();
+    }
 }
 
 fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
     compiler.parser.consume(.identifier, msg);
+    const name = compiler.parser.previous.?;
 
     compiler.declareVariable();
     if (compiler.scope_depth > 0) return 0;
-    return compiler.identifierConstant();
+    return compiler.identifierConstant(name);
 }
 
-fn identifierConstant(compiler: *Compiler) CompileError!u8 {
-    return compiler.makeConstant(.{ .object = try compiler.copyIdentifier() });
+fn identifierConstant(compiler: *Compiler, name: Scanner.Token) CompileError!u8 {
+    return compiler.makeConstant(.{ .object = try compiler.copyIdentifier(name) });
 }
 
 fn defineVariable(compiler: *Compiler, index: u8) CompileError!void {
@@ -466,7 +499,18 @@ fn addLocal(compiler: *Compiler, name: Scanner.Token) void {
     };
 }
 
+fn printLocals(compiler: *Compiler) void {
+    log.debug("Locals: \n       ", .{});
+    for (compiler.locals) |local| {
+        if (local.depth == compiler.scope_depth) {
+            log.debug("[ {s} ]", .{local.name.raw});
+        }
+    }
+    log.debug("\n", .{});
+}
+
 fn resolveLocal(compiler: *Compiler, name: Scanner.Token) isize {
+    compiler.printLocals();
     if (compiler.local_count == 0) {
         return -1;
     }
@@ -533,7 +577,7 @@ fn namedVariable(compiler: *Compiler, name: Scanner.Token, can_assign: bool) Com
             setOp = .set_upvalue;
             getOp = .get_upvalue;
         } else {
-            op_arg = try compiler.identifierConstant();
+            op_arg = try compiler.identifierConstant(name);
         }
     }
 
@@ -715,6 +759,28 @@ fn this(compiler: *Compiler, _: bool) CompileError!void {
     try compiler.variable(false);
 }
 
+fn super(compiler: *Compiler, _: bool) CompileError!void {
+    if (compiler.current_class == null) {
+        compiler.parser.err("Can't use 'super' outside of a class.");
+    } else if (!compiler.current_class.?.has_superclass) {
+        compiler.parser.err("Can't use 'super' in a class with no superclass.");
+    }
+    compiler.parser.consume(.dot, "Expected '.' after 'super'.");
+    compiler.parser.consume(.identifier, "Expected superclass method name.");
+    const name = try compiler.identifierConstant(compiler.parser.previous.?);
+
+    try compiler.namedVariable(syntheticToken("this"), false);
+    if (compiler.parser.match(.left_paren)) {
+        const arguments = try compiler.argList();
+        try compiler.namedVariable(syntheticToken("super"), false);
+        try compiler.emitOpAndArg(.super_invoke, name);
+        try compiler.emitByte(arguments);
+    } else {
+        try compiler.namedVariable(syntheticToken("super"), false);
+        try compiler.emitOpAndArg(.get_super, name);
+    }
+}
+
 fn call(compiler: *Compiler, _: bool) CompileError!void {
     const arg_count = try compiler.argList();
     try compiler.emitOpAndArg(.call, arg_count);
@@ -722,7 +788,7 @@ fn call(compiler: *Compiler, _: bool) CompileError!void {
 
 fn dot(compiler: *Compiler, can_assign: bool) CompileError!void {
     compiler.parser.consume(.identifier, "Expected property name after '.'.");
-    const name = try compiler.identifierConstant();
+    const name = try compiler.identifierConstant(compiler.parser.previous.?);
 
     if (can_assign and compiler.parser.match(.equal)) {
         try compiler.expression();
@@ -775,7 +841,7 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
     var fun_compiler = try Compiler.init(compiler.manager, function_type);
     fun_compiler.enclosing = compiler;
     compiler.inner = &fun_compiler;
-    fun_compiler.function.name = (try compiler.copyIdentifier()).as(Object.String);
+    fun_compiler.function.name = (try compiler.copyIdentifier(compiler.parser.previous.?)).as(Object.String);
     fun_compiler.current_class = compiler.current_class;
     fun_compiler.beginScope();
     fun_compiler.parser = compiler.parser;
@@ -800,10 +866,10 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
 
 fn method(compiler: *Compiler) !void {
     compiler.parser.consume(.identifier, "Expected method name.");
-    const name = try compiler.identifierConstant();
-    const name_raw = compiler.parser.previous.?.raw;
+    const name_raw = compiler.parser.previous.?;
+    const name = try compiler.identifierConstant(name_raw);
 
-    const method_type: FunctionType = if (std.mem.eql(u8, "init", name_raw)) .initializer else .method;
+    const method_type: FunctionType = if (std.mem.eql(u8, "init", name_raw.raw)) .initializer else .method;
 
     try compiler.compileFunction(method_type);
     try compiler.emitOpAndArg(.method, name);
@@ -814,8 +880,8 @@ fn copyString(compiler: *Compiler) !*Object {
     return compiler.manager.copy(compiler.parser.previous.?.raw[1 .. original.len - 1]);
 }
 
-fn copyIdentifier(compiler: *Compiler) !*Object {
-    return compiler.manager.copy(compiler.parser.previous.?.raw);
+fn copyIdentifier(compiler: *Compiler, name: Scanner.Token) !*Object {
+    return compiler.manager.copy(name.raw);
 }
 
 fn literal(compiler: *Compiler, _: bool) CompileError!void {

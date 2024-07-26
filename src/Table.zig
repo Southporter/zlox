@@ -49,7 +49,7 @@ pub fn set(table: *Table, key: *Object.String, value: Value) !bool {
 pub fn addAll(to: *Table, from: *Table) !void {
     for (from.entries) |entry| {
         if (entry.key) |k| {
-            try to.set(k, entry.value);
+            _ = try to.set(k, entry.value);
         }
     }
 }

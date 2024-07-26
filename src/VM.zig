@@ -161,6 +161,14 @@ pub fn run(vm: *VM) Error!Value {
                 try vm.invoke(method_name, arg_count);
                 frame = &vm.frames[vm.frame_count - 1];
             },
+            .super_invoke => {
+                const method_name = frame.readString();
+                const arg_count = frame.readByte();
+                const super_class = vm.pop().object.as(Object.Class);
+
+                try vm.invokeFromClass(super_class, method_name, arg_count);
+                frame = &vm.frames[vm.frame_count - 1];
+            },
             .closure => {
                 const fun = frame.readConstant().object.as(Object.Function);
                 const closure = try vm.manager.allocClosure(fun);
@@ -179,6 +187,16 @@ pub fn run(vm: *VM) Error!Value {
                 const name = frame.readConstant().object.as(Object.String);
                 const class = try vm.manager.allocClass(name);
                 vm.push(.{ .object = &class.object });
+            },
+            .inherit => {
+                const superclass = vm.peek(1);
+                if (!superclass.isClass()) {
+                    vm.runtimeError("Superclass must be a class\n", .{});
+                    return error.RuntimeError;
+                }
+                const subclass = vm.peek(0).object.as(Object.Class);
+                try subclass.methods.addAll(&superclass.object.as(Object.Class).methods);
+                _ = vm.pop(); // subclass
             },
             .method => {
                 try vm.defineMethod(frame.readString());
@@ -259,6 +277,16 @@ pub fn run(vm: *VM) Error!Value {
                 const val = vm.pop();
                 _ = vm.pop(); // Instance
                 vm.push(val);
+            },
+            .get_super => {
+                const name = frame.readString();
+                const superclass = vm.pop().object.as(Object.Class);
+
+                if (try vm.bindMethod(superclass, name)) |val| {
+                    vm.push(val);
+                } else {
+                    return error.RuntimeError;
+                }
             },
             .print => {
                 values.print(vm.pop(), log.warn);
@@ -961,4 +989,36 @@ test "Chapter 28: Invoking fields" {
 
     const res = try vm.interpret(input);
     try std.testing.expectEqualStrings("not a method", res.object.as(Object.String).data);
+}
+
+test "Chapter 29: Super methods" {
+    const input =
+        \\ class A {
+        \\   method() {
+        \\     return "A method";
+        \\   }
+        \\ }
+        \\
+        \\ class B < A {
+        \\   method() {
+        \\     return "B method";
+        \\   }
+        \\
+        \\   test() {
+        \\     return super.method();
+        \\   }
+        \\ }
+        \\
+        \\ class C < B {}
+        \\
+        \\ return C().test();
+        \\
+    ;
+
+    var vm: VM = undefined;
+    vm.init(std.testing.allocator);
+    defer vm.deinit();
+
+    const res = try vm.interpret(input);
+    try std.testing.expectEqualStrings("A method", res.object.as(Object.String).data);
 }

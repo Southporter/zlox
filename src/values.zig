@@ -49,6 +49,12 @@ pub const Value = union(ValueTag) {
             else => false,
         };
     }
+    pub fn isClass(value: *const Value) bool {
+        return switch (value.*) {
+            .object => |obj| obj.tag == .class,
+            else => false,
+        };
+    }
     pub fn unwrap(value: *const Value) Value {
         return switch (value.*) {
             .object => |obj| switch (obj.tag) {

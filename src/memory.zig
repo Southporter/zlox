@@ -98,7 +98,7 @@ pub const Manager = struct {
 
     pub fn copy(manager: *Manager, str: []const u8) !*Object {
         const interned = manager.strings.find(str);
-        log.debug("Copying identifier: {?} -> {}?\n", .{ interned, interned != null });
+        log.debug("Copying identifier: {?} -> {}?\n", .{ interned, interned == null });
 
         if (interned) |i| {
             return &i.object;
