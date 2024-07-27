@@ -164,7 +164,7 @@ pub fn print(value: Value, printer: Printer) void {
         } else if (isNumber(value)) {
             printer("{d}", .{valueToNum(value)});
         } else if (isObject(value)) {
-            printObject(asObject(value));
+            printObject(asObject(value), printer);
         }
     } else {
         switch (value) {
@@ -172,6 +172,26 @@ pub fn print(value: Value, printer: Printer) void {
             .boolean => printer("{}", .{value.boolean}),
             .nil => printer("nil", .{}),
             .object => printObject(value.object, printer),
+        }
+    }
+}
+pub fn write(value: Value, writer: anytype) anyerror!void {
+    if (config.nan_tagging) {
+        if (isBool(value)) {
+            try writer.print("{}", .{asBool(value)});
+        } else if (isNil(value)) {
+            _ = try writer.write("nil");
+        } else if (isNumber(value)) {
+            try writer.print("{d}", .{valueToNum(value)});
+        } else if (isObject(value)) {
+            try writeObject(asObject(value), writer);
+        }
+    } else {
+        switch (value) {
+            .number => |val| try writer.print("{any}", .{val}),
+            .boolean => |val| try writer.print("{}", .{val}),
+            .nil => _ = try writer.write("nil"),
+            .object => |obj| try writeObject(obj, writer),
         }
     }
 }
@@ -206,6 +226,39 @@ pub fn printObject(object: *Object, printer: Printer) void {
         },
         .bound_method => {
             printObject(&object.as(Object.BoundMethod).method.function.object, printer);
+        },
+    }
+}
+pub fn writeObject(object: *Object, writer: anytype) anyerror!void {
+    switch (object.tag) {
+        .string => try writer.print("{s}", .{object.as(Object.String).data}),
+        .function => {
+            const fun = object.as(Object.Function);
+            if (fun.name) |name| {
+                try writer.print("<fn {s}>", .{name.data});
+            } else {
+                try writer.print("<script>", .{});
+            }
+        },
+        .native => {
+            try writer.print("<fn native>", .{});
+        },
+        .closure => {
+            try writer.print("<closure>", .{});
+        },
+        .upvalue => {
+            try writer.print("upvalue ", .{});
+            try write(object.as(Object.Upvalue).location.*, writer);
+            // printer("", .{});
+        },
+        .class => {
+            try writer.print("{s}", .{object.as(Object.Class).name});
+        },
+        .instance => {
+            try writer.print("{s} instance", .{object.as(Object.Instance).class.name});
+        },
+        .bound_method => {
+            try writeObject(&object.as(Object.BoundMethod).method.function.object, writer);
         },
     }
 }

@@ -39,7 +39,7 @@ pub fn set(table: *Table, key: *Object.String, value: Value) !bool {
 
     var entry = table.findEntry(key);
     const isNewKey = entry.key == null;
-    if (isNewKey and std.meta.activeTag(entry.value) == .nil) table.count += 1;
+    if (isNewKey and values.isNil(entry.value)) table.count += 1;
 
     entry.key = key;
     entry.value = value;
@@ -87,13 +87,11 @@ fn findEntry(table: *Table, key: *Object.String) *Entry {
                 return entry;
             }
         } else {
-            switch (entry.value) {
-                .nil => return if (tombstone) |t| t else entry,
-                .boolean => |b| {
-                    std.debug.assert(b);
-                    tombstone = entry;
-                },
-                else => unreachable,
+            if (values.isNil(entry.value)) {
+                return if (tombstone) |t| t else entry;
+            } else if (values.isBool(entry.value)) {
+                std.debug.assert(values.asBool(entry.value));
+                tombstone = entry;
             }
         }
 
@@ -131,11 +129,11 @@ test "Basic set/get" {
     var table = try Table.init(std.testing.allocator);
     defer table.deinit();
 
-    try std.testing.expect(try table.set(&key1, .{ .number = 5 }));
-    try std.testing.expect(try table.set(&key2, .{ .boolean = true }));
+    try std.testing.expect(try table.set(&key1, values.numToValue(5)));
+    try std.testing.expect(try table.set(&key2, values.TRUE_VAL));
 
     const num = table.get(&key1);
-    try std.testing.expectEqual(Value{ .number = 5 }, num.?);
+    try std.testing.expectEqual(5, values.valueToNum(num.?));
     const b = table.get(&key2);
-    try std.testing.expectEqual(Value{ .boolean = true }, b.?);
+    try std.testing.expectEqual(values.TRUE_VAL, b.?);
 }

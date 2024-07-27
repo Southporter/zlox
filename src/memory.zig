@@ -270,9 +270,8 @@ pub const Manager = struct {
     }
 
     fn markValue(manager: *Manager, value: Value) !void {
-        switch (value) {
-            .object => |obj| try manager.markObject(obj),
-            else => {},
+        if (values.isObject(value)) {
+            try manager.markObject(values.asObject(value));
         }
     }
 

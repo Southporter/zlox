@@ -6,11 +6,11 @@ const Object = @import("Object.zig");
 const log = std.log.scoped(.debugger);
 
 pub const LogWriter = struct {
-    pub fn print(_: *const LogWriter, comptime format: []const u8, args: anytype) !void {
+    pub fn print(_: *const LogWriter, comptime format: []const u8, args: anytype) error{OutOfMemory}!void {
         log.debug(format, args);
     }
 
-    pub fn write(_: *const LogWriter, comptime out: []const u8) !void {
+    pub fn write(_: *const LogWriter, comptime out: []const u8) error{OutOfMemory}!void {
         log.debug(out, .{});
     }
 };
@@ -82,7 +82,7 @@ fn constantInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: a
     const index = chunk.code[offset + 1];
     const constant = chunk.constants.items[index];
     try writer.print("{s:<16} {d:>4} ", .{ name, index });
-    try printValue(constant, writer);
+    try values.write(constant, writer);
     _ = try writer.write("\n");
     return offset + 2;
 }
@@ -92,7 +92,7 @@ fn invokeInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: any
     const constant = chunk.constants.items[constant_index];
     const arg_count = chunk.code[offset + 2];
     try writer.print("{s:<16} ({d} args) {d:>4}", .{ name, arg_count, constant_index });
-    try printValue(constant, writer);
+    try values.write(constant, writer);
     _ = try writer.write("\n");
     return offset + 3;
 }
@@ -102,11 +102,11 @@ fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
     const index = chunk.code[offset + 1];
     try writer.print("{s:<16} {d:>4} ", .{ "OP_CLOSURE", index });
     const constant = chunk.constants.items[index];
-    try printValue(constant, writer);
+    try values.write(constant, writer);
     _ = try writer.write("\n");
     new_offset += 2;
 
-    const fun = constant.object.as(Object.Function);
+    const fun = values.asObject(constant).as(Object.Function);
     var j: usize = 0;
     while (j < fun.upvalue_count) : (j += 1) {
         defer new_offset += 2;
@@ -115,41 +115,6 @@ fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
         try writer.print("{d:0>4}    |                     {s} {d}\n", .{ new_offset, if (is_local == 1) "local" else "upvalue", upvalue_index });
     }
     return new_offset;
-}
-
-pub fn printValue(constant: values.Value, writer: anytype) !void {
-    switch (constant) {
-        .number => |val| try writer.print("{any}", .{val}),
-        .boolean => |val| try writer.print("{}", .{val}),
-        .nil => _ = try writer.write("nil"),
-        .object => |obj| try printObject(obj, writer),
-    }
-}
-
-fn printObject(obj: *Object, writer: anytype) !void {
-    switch (obj.tag) {
-        .string => try writer.print("\"{s}\"", .{obj.as(Object.String).data}),
-        .function => {
-            const fun = obj.as(Object.Function);
-            if (fun.name) |n| {
-                try writer.print("<fn {s}>", .{n.data});
-            } else {
-                _ = try writer.write("<script>");
-            }
-        },
-        .closure => {
-            _ = try writer.write("<closure ");
-            try printObject(&obj.as(Object.Closure).function.object, writer);
-            _ = try writer.write(" >");
-        },
-        .native => {
-            _ = try writer.write("<fn native>");
-        },
-        .upvalue => _ = try writer.write("<upvalue>"),
-        .class => try writer.print("{s}", .{obj.as(Object.Class).name}),
-        .instance => try writer.print("{s} instance", .{obj.as(Object.Instance).class.name}),
-        .bound_method => try printObject(&obj.as(Object.BoundMethod).method.function.object, writer),
-    }
 }
 
 fn byteInstruction(name: []const u8, chunk: *Chunk, offset: usize, writer: anytype) !usize {
@@ -173,7 +138,7 @@ test "Simple dissassembly" {
     defer chunk.deinit();
     try chunk.writeOp(.@"return", 123);
     try chunk.writeOp(.constant, 123);
-    const pi_index = try chunk.addConstant(.{ .number = 3.14 });
+    const pi_index = try chunk.addConstant(values.numToValue(3.14));
     try chunk.write(pi_index, 123);
     try chunk.writeOp(.negate, 124);
     try chunk.writeOp(.add, 124);
@@ -187,7 +152,7 @@ test "Simple dissassembly" {
     try chunk.writeOp(.greater, 125);
     try chunk.writeOp(.less, 125);
     try chunk.writeOp(.define_global, 126);
-    const answer_index = try chunk.addConstant(.{ .number = 42 });
+    const answer_index = try chunk.addConstant(values.numToValue(42));
     try chunk.write(answer_index, 126);
     try chunk.writeOp(.get_local, 127);
     try chunk.write(0, 127);
@@ -229,7 +194,7 @@ test "Simple dissassembly" {
     const output =
         \\== test ==
         \\0000  123 OP_RETURN
-        \\0001    | OP_CONSTANT         0 3.14e0
+        \\0001    | OP_CONSTANT         0 3.14
         \\0003  124 OP_NEGATE
         \\0004    | OP_ADD
         \\0005    | OP_SUBTRACT
@@ -241,7 +206,7 @@ test "Simple dissassembly" {
         \\0011    | OP_EQUAL
         \\0012    | OP_GREATER
         \\0013    | OP_LESS
-        \\0014  126 OP_DEFINE_GLOBAL    1 4.2e1
+        \\0014  126 OP_DEFINE_GLOBAL    1 42
         \\0016  127 OP_GET_LOCAL        0
         \\0018    | OP_SET_LOCAL       13
         \\0020  128 OP_JUMP            20 -> 35

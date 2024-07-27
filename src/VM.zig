@@ -49,7 +49,7 @@ const CallFrame = struct {
 
     fn readString(frame: *CallFrame) *Object.String {
         const constant = frame.readConstant();
-        return constant.object.as(Object.String);
+        return values.asObject(constant).as(Object.String);
     }
     fn printConstants(frame: *CallFrame) void {
         log.debug("           ", .{});
@@ -120,7 +120,7 @@ pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
 pub fn run(vm: *VM) Error!Value {
     var frame = &vm.frames[vm.frame_count - 1];
 
-    try debug.disassembleChunk(frame.chunk(), frame.getName(), debug.Writer);
+    debug.disassembleChunk(frame.chunk(), frame.getName(), debug.Writer) catch {};
     while (true) {
         vm.printStack(log.debug);
         _ = debug.disassembleInstruction(frame.chunk(), @intFromPtr(frame.ip) - @intFromPtr(frame.chunk().code.ptr), debug.Writer) catch {};
@@ -164,13 +164,13 @@ pub fn run(vm: *VM) Error!Value {
             .super_invoke => {
                 const method_name = frame.readString();
                 const arg_count = frame.readByte();
-                const super_class = vm.pop().object.as(Object.Class);
+                const super_class = values.asObject(vm.pop()).as(Object.Class);
 
                 try vm.invokeFromClass(super_class, method_name, arg_count);
                 frame = &vm.frames[vm.frame_count - 1];
             },
             .closure => {
-                const fun = frame.readConstant().object.as(Object.Function);
+                const fun = values.asObject(frame.readConstant()).as(Object.Function);
                 const closure = try vm.manager.allocClosure(fun);
                 vm.push(values.objectToValue(&closure.object));
                 for (closure.upvalues) |*upvalue| {
@@ -184,7 +184,7 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .class => {
-                const name = frame.readConstant().object.as(Object.String);
+                const name = values.asObject(frame.readConstant()).as(Object.String);
                 const class = try vm.manager.allocClass(name);
                 vm.push(values.objectToValue(&class.object));
             },
@@ -194,8 +194,8 @@ pub fn run(vm: *VM) Error!Value {
                     vm.runtimeError("Superclass must be a class\n", .{});
                     return error.RuntimeError;
                 }
-                const subclass = vm.peek(0).object.as(Object.Class);
-                try subclass.methods.addAll(&superclass.object.as(Object.Class).methods);
+                const subclass = values.asObject(vm.peek(0)).as(Object.Class);
+                try subclass.methods.addAll(&values.asObject(superclass).as(Object.Class).methods);
                 _ = vm.pop(); // subclass
             },
             .method => {
@@ -206,12 +206,12 @@ pub fn run(vm: *VM) Error!Value {
             },
             .define_global => {
                 const constant = frame.readConstant();
-                const name = constant.object.as(Object.String);
+                const name = values.asObject(constant).as(Object.String);
                 _ = try vm.globals.set(name, vm.peek(0));
                 _ = vm.pop();
             },
             .get_global => {
-                const name = frame.readConstant().object.as(Object.String);
+                const name = values.asObject(frame.readConstant()).as(Object.String);
                 const value = vm.globals.get(name);
 
                 if (value) |val| {
@@ -222,7 +222,7 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .set_global => {
-                const name = frame.readConstant().object.as(Object.String);
+                const name = values.asObject(frame.readConstant()).as(Object.String);
                 const is_new = try vm.globals.set(name, vm.peek(0));
                 if (is_new) {
                     _ = vm.globals.delete(name);
@@ -295,15 +295,14 @@ pub fn run(vm: *VM) Error!Value {
             .true => vm.push(values.TRUE_VAL),
             .false => vm.push(values.FALSE_VAL),
             .nil => vm.push(values.NIL_VAL),
-            .negate => switch (vm.peek(0)) {
-                .number => {
-                    var value = vm.get(0);
-                    value.number = -value.number;
-                },
-                .boolean, .nil, .object => {
+            .negate => {
+                if (values.isNumber(vm.peek(0))) {
+                    const value = values.valueToNum(vm.pop());
+                    vm.push(values.numToValue(-value));
+                } else {
                     vm.runtimeError("Operand must be a number.", .{});
                     return error.RuntimeError;
-                },
+                }
             },
             .not => vm.push(values.boolToValue(values.isFalsey(vm.pop()))),
             .equal => {
@@ -364,11 +363,12 @@ fn get(vm: *VM, distance: usize) *Value {
 }
 
 fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
-    if (std.meta.activeTag(callee) == .object) {
-        switch (callee.object.tag) {
-            .closure => return vm.call(callee.object.as(Object.Closure), arg_count),
+    if (values.isObject(callee)) {
+        var obj = values.asObject(callee);
+        switch (obj.tag) {
+            .closure => return vm.call(obj.as(Object.Closure), arg_count),
             .native => {
-                const native = callee.object.as(Object.Native);
+                const native = obj.as(Object.Native);
                 const args = vm.stack_top - arg_count;
                 const result = try native.function(arg_count, args, &vm.manager);
                 vm.stack_top -= arg_count + 1;
@@ -376,7 +376,7 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
                 return;
             },
             .class => {
-                const class = callee.object.as(Object.Class);
+                const class = obj.as(Object.Class);
                 const instance = try vm.manager.allocInstance(class);
                 var slot = vm.stack_top - arg_count - 1;
                 slot[0] = values.objectToValue(&instance.object);
@@ -392,7 +392,7 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
                 return;
             },
             .bound_method => {
-                const bound = callee.object.as(Object.BoundMethod);
+                const bound = obj.as(Object.BoundMethod);
                 const slot = vm.stack_top - arg_count - 1;
                 slot[0] = bound.receiver;
                 return vm.call(bound.method, arg_count);
@@ -406,7 +406,7 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
 
 fn invokeFromClass(vm: *VM, class: *Object.Class, name: *Object.String, arg_count: u8) !void {
     if (class.methods.get(name)) |method| {
-        return vm.call(method.object.as(Object.Closure), arg_count);
+        return vm.call(values.asObject(method).as(Object.Closure), arg_count);
     } else {
         vm.runtimeError("Undefined property: '{s}'\n", .{name.data});
         return error.RuntimeError;
@@ -488,7 +488,7 @@ fn closeUpvalues(vm: *VM, last: *Value) void {
 
 fn defineMethod(vm: *VM, name: *Object.String) !void {
     const method = vm.peek(0);
-    const class = vm.peek(1).object.as(Object.Class);
+    const class = values.asObject(vm.peek(1)).as(Object.Class);
     _ = try class.methods.set(name, method);
     _ = vm.pop();
 }

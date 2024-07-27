@@ -32,11 +32,15 @@ fn constToString(content: []const u8, manager: *Manager) !Value {
 
 pub fn toString(arg_count: u8, values: [*]Value, manager: *Manager) NativeError!Value {
     if (arg_count != 1) return error.WrongArity;
-    const result = switch (values[0]) {
-        .number => |i| try floatToString(i, manager),
-        .boolean => |b| try constToString(if (b) "true" else "false", manager),
-        .nil => try constToString("nil", manager),
-        else => error.BadValue,
-    };
-    return result;
+    const val = values[0];
+    if (vals.isNumber(val)) {
+        return floatToString(vals.valueToNum(val), manager);
+    }
+    if (vals.isBool(val)) {
+        return constToString(if (vals.asBool(val)) "true" else "false", manager);
+    }
+    if (vals.isNil(val)) {
+        return constToString("nil", manager);
+    }
+    return error.BadValue;
 }

@@ -1017,7 +1017,7 @@ test "Chunk compilation" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, func.chunk.constants.items);
+    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{values.numToValue(1), values.numToValue(2), values.numToValue(3), values.numToValue(4),}, func.chunk.constants.items);
 }
 test "Chapter 17 Challenge 1" {
     const source =
@@ -1048,7 +1048,7 @@ test "Chapter 17 Challenge 1" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, func.chunk.constants.items);
+    try std.testing.expectEqualSlices(values.Value, &[_]values.Value{values.numToValue(1), values.numToValue(2), values.numToValue(3), values.numToValue(4)}, func.chunk.constants.items);
 }
 
 test "Chapter 21: Globals" {
@@ -1089,11 +1089,11 @@ test "Chapter 21: Globals" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualStrings("empty", func.chunk.constants.items[0].object.as(Object.String).data);
-    try std.testing.expectEqualStrings("breakfast", func.chunk.constants.items[1].object.as(Object.String).data);
-    try std.testing.expectEqualStrings("beignets",func. chunk.constants.items[2].object.as(Object.String).data);
-    try std.testing.expectEqualStrings("beverage", func.chunk.constants.items[3].object.as(Object.String).data);
-    try std.testing.expectEqualStrings("cafe au lait", func.chunk.constants.items[4].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("empty", values.asObject(func.chunk.constants.items[0]).as(Object.String).data);
+    try std.testing.expectEqualStrings("breakfast", values.asObject(func.chunk.constants.items[1]).as(Object.String).data);
+    try std.testing.expectEqualStrings("beignets", values.asObject(func.chunk.constants.items[2]).as(Object.String).data);
+    try std.testing.expectEqualStrings("beverage", values.asObject(func.chunk.constants.items[3]).as(Object.String).data);
+    try std.testing.expectEqualStrings("cafe au lait", values.asObject(func.chunk.constants.items[4]).as(Object.String).data);
 }
 
 // test "Chapter 22: Conflicting locals" {
@@ -1162,8 +1162,8 @@ test "Chapter 22: variables" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualStrings("test", func.chunk.constants.items[0].object.as(Object.String).data);
-    try std.testing.expectEqualStrings(" is successful", func.chunk.constants.items[1].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("test", values.asObject(func.chunk.constants.items[0]).as(Object.String).data);
+    try std.testing.expectEqualStrings(" is successful", values.asObject(func.chunk.constants.items[1]).as(Object.String).data);
 }
 
 test "Chapter 22: block global access" {
@@ -1196,8 +1196,8 @@ test "Chapter 22: block global access" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqualStrings("global", func.chunk.constants.items[0].object.as(Object.String).data);
-    try std.testing.expectEqualStrings("test", func.chunk.constants.items[1].object.as(Object.String).data);
+    try std.testing.expectEqualStrings("global", values.asObject(func.chunk.constants.items[0]).as(Object.String).data);
+    try std.testing.expectEqualStrings("test", values.asObject(func.chunk.constants.items[1]).as(Object.String).data);
 }
 
 
@@ -1244,8 +1244,8 @@ test "Chapter 23: If statements" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    try std.testing.expectEqual(1, func.chunk.constants.items[0].number);
-    try std.testing.expectEqual(2, func.chunk.constants.items[1].number);
+    try std.testing.expectEqual(1, values.valueToNum(func.chunk.constants.items[0]));
+    try std.testing.expectEqual(2, values.valueToNum(func.chunk.constants.items[1]));
 }
 
 test "Chapter 23: while statements" {
@@ -1358,7 +1358,7 @@ test "Chapter 24: function declaration" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
-    const func_decl = func.chunk.constants.items[1].object.as(Object.Function);
+    const func_decl = values.asObject(func.chunk.constants.items[1]).as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.get_local), 1,
@@ -1401,7 +1401,7 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, script.chunk.code[0..script.chunk.count]);
-    const outer = script.chunk.constants.items[1].object.as(Object.Function);
+    const outer = values.asObject(script.chunk.constants.items[1]).as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
@@ -1414,7 +1414,7 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, outer.chunk.code[0..outer.chunk.count]);
-    const middle = outer.chunk.constants.items[2].object.as(Object.Function);
+    const middle = values.asObject(outer.chunk.constants.items[2]).as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
@@ -1429,7 +1429,7 @@ test "Chapter 25: closure upvalues" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, middle.chunk.code[0..middle.chunk.count]);
-    const inner = middle.chunk.constants.items[2].object.as(Object.Function);
+    const inner = values.asObject(middle.chunk.constants.items[2]).as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.get_upvalue), 0,
@@ -1574,7 +1574,7 @@ test "Chapter 28: initializer" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, script.chunk.code[0..script.chunk.count]);
-    const init_fun = script.chunk.constants.items[2].object.as(Object.Function);
+    const init_fun = values.asObject(script.chunk.constants.items[2]).as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.get_local), 0,
@@ -1585,7 +1585,7 @@ test "Chapter 28: initializer" {
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, init_fun.chunk.code[0..init_fun.chunk.count]);
-    const brew_fun = script.chunk.constants.items[4].object.as(Object.Function);
+    const brew_fun = values.asObject(script.chunk.constants.items[4]).as(Object.Function);
     try std.testing.expectEqualSlices(u8, &[_]u8{
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
