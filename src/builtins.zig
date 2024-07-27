@@ -22,12 +22,12 @@ fn floatToString(f: f64, manager: *Manager) !Value {
     var buf: [64]u8 = undefined;
     const str = std.fmt.bufPrint(buf[0..], "{d}", .{f}) catch unreachable;
     const str_obj = try manager.copy(str);
-    return .{ .object = str_obj };
+    return vals.objectToValue(str_obj);
 }
 
 fn constToString(content: []const u8, manager: *Manager) !Value {
     const str = try manager.copy(content);
-    return .{ .object = str };
+    return vals.objectToValue(str);
 }
 
 pub fn toString(arg_count: u8, values: [*]Value, manager: *Manager) NativeError!Value {

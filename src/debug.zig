@@ -208,7 +208,7 @@ test "Simple dissassembly" {
     fun.upvalue_count = 4;
     var fun_name = Object.String.from("inner");
     fun.name = &fun_name;
-    const fun_index = try chunk.addConstant(.{ .object = &fun.object });
+    const fun_index = try chunk.addConstant(values.objectToValue(&fun.object));
     try chunk.writeOp(.closure, 129);
     try chunk.write(fun_index, 129);
     try chunk.write(1, 129);

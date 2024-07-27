@@ -109,10 +109,10 @@ pub fn interpret(vm: *VM, input: []const u8) Error!Value {
 }
 
 pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
-    vm.push(.{ .object = &function.object });
+    vm.push(values.objectToValue(&function.object));
     const closure = try vm.manager.allocClosure(function);
     _ = vm.pop();
-    vm.push(.{ .object = &closure.object });
+    vm.push(values.objectToValue(&closure.object));
     try vm.call(closure, 0);
     return vm.run();
 }
@@ -172,7 +172,7 @@ pub fn run(vm: *VM) Error!Value {
             .closure => {
                 const fun = frame.readConstant().object.as(Object.Function);
                 const closure = try vm.manager.allocClosure(fun);
-                vm.push(.{ .object = &closure.object });
+                vm.push(values.objectToValue(&closure.object));
                 for (closure.upvalues) |*upvalue| {
                     const is_local = frame.readByte();
                     const index = frame.readByte();
@@ -186,7 +186,7 @@ pub fn run(vm: *VM) Error!Value {
             .class => {
                 const name = frame.readConstant().object.as(Object.String);
                 const class = try vm.manager.allocClass(name);
-                vm.push(.{ .object = &class.object });
+                vm.push(values.objectToValue(&class.object));
             },
             .inherit => {
                 const superclass = vm.peek(1);
@@ -379,11 +379,11 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
                 const class = callee.object.as(Object.Class);
                 const instance = try vm.manager.allocInstance(class);
                 var slot = vm.stack_top - arg_count - 1;
-                slot[0] = .{ .object = &instance.object };
+                slot[0] = values.objectToValue(&instance.object);
                 vm.printStack(log.debug);
 
                 if (class.methods.get(vm.init_string)) |val| {
-                    return vm.call(val.object.as(Object.Closure), arg_count);
+                    return vm.call(values.asObject(val).as(Object.Closure), arg_count);
                 } else if (arg_count != 0) {
                     // Empty constructor has too many args
                     vm.runtimeError("Constructor expected 0 arguments but got {d}\n", .{arg_count});
@@ -431,9 +431,9 @@ fn invoke(vm: *VM, name: *Object.String, arg_count: u8) !void {
 
 fn bindMethod(vm: *VM, class: *Object.Class, name: *Object.String) !?Value {
     if (class.methods.get(name)) |val| {
-        const bound = try vm.manager.allocBoundMethod(vm.peek(0), val.object.as(Object.Closure));
+        const bound = try vm.manager.allocBoundMethod(vm.peek(0), values.asObject(val).as(Object.Closure));
         _ = vm.pop();
-        return .{ .object = &bound.object };
+        return values.objectToValue(&bound.object);
     } else {
         return null;
     }
@@ -494,22 +494,22 @@ fn defineMethod(vm: *VM, name: *Object.String) !void {
 }
 
 fn concatenate(vm: *VM) !void {
-    const str_b = vm.peek(0).object.as(Object.String);
-    const str_a = vm.peek(1).object.as(Object.String);
+    const str_b = values.asObject(vm.peek(0)).as(Object.String);
+    const str_a = values.asObject(vm.peek(1)).as(Object.String);
 
     const new_str = try vm.manager.concat(str_a.data, str_b.data);
 
     _ = vm.pop();
     _ = vm.pop();
-    vm.push(.{ .object = new_str });
+    vm.push(values.objectToValue(new_str));
 }
 
 fn defineNative(vm: *VM, name: []const u8, func: Object.NativeFn) !void {
-    vm.push(.{ .object = try vm.manager.copy(name) });
+    vm.push(values.objectToValue(try vm.manager.copy(name)));
     const native = try vm.manager.allocObject(Object.Native);
     native.as(Object.Native).function = func;
-    vm.push(.{ .object = native });
-    std.debug.assert(try vm.globals.set(vm.stack[0].object.as(Object.String), vm.stack[1]));
+    vm.push(values.objectToValue(native));
+    std.debug.assert(try vm.globals.set(values.asObject(vm.stack[0]).as(Object.String), vm.stack[1]));
     _ = vm.pop();
     _ = vm.pop();
 }
@@ -545,7 +545,7 @@ test "basic run" {
     defer vm.deinit();
     var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
-    const index = try chunk.addConstant(values.numberToValue(3.14));
+    const index = try chunk.addConstant(values.numToValue(3.14));
     try chunk.writeOp(.constant, 0);
     try chunk.write(index, 0);
     try chunk.writeOp(.@"return", 0);
@@ -565,10 +565,10 @@ test "basic arithmatic" {
 
     const pi = 3.1415926;
     try chunk.writeOp(.constant, 0);
-    const pi_index = try chunk.addConstant(values.numberToValue(pi));
+    const pi_index = try chunk.addConstant(values.numToValue(pi));
     try chunk.write(pi_index, 0);
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(values.numberToValue(2.0));
+    const two_index = try chunk.addConstant(values.numToValue(2.0));
     try chunk.write(two_index, 0);
     try chunk.writeOp(.multiply, 0);
     try chunk.writeOp(.constant, 0);

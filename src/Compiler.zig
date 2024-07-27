@@ -347,7 +347,7 @@ fn emitConstant(compiler: *Compiler, constant: values.Value) !void {
 }
 
 fn emitClosure(compiler: *Compiler, function: *Object.Function) !void {
-    try compiler.emitOpAndArg(.closure, try compiler.makeConstant(.{ .object = &function.object }));
+    try compiler.emitOpAndArg(.closure, try compiler.makeConstant(values.objectToValue(&function.object)));
 }
 
 fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
@@ -454,7 +454,7 @@ fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
 }
 
 fn identifierConstant(compiler: *Compiler, name: Scanner.Token) CompileError!u8 {
-    return compiler.makeConstant(.{ .object = try compiler.copyIdentifier(name) });
+    return compiler.makeConstant(values.objectToValue(try compiler.copyIdentifier(name)));
 }
 
 fn defineVariable(compiler: *Compiler, index: u8) CompileError!void {
@@ -738,11 +738,11 @@ fn expression(compiler: *Compiler) CompileError!void {
 
 fn number(compiler: *Compiler, _: bool) CompileError!void {
     const val = try std.fmt.parseFloat(f64, compiler.parser.previous.?.raw);
-    try compiler.emitConstant(.{ .number = val });
+    try compiler.emitConstant(values.numToValue(val));
 }
 
 fn string(compiler: *Compiler, _: bool) CompileError!void {
-    try compiler.emitConstant(.{ .object = try compiler.copyString() });
+    try compiler.emitConstant(values.objectToValue(try compiler.copyString()));
 }
 
 fn variable(compiler: *Compiler, can_assign: bool) CompileError!void {

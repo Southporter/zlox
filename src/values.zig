@@ -92,7 +92,11 @@ pub fn asObject(value: Value) *Object {
     }
 }
 pub fn objectToValue(obj: *Object) Value {
-    if (config.nan_tagging) {}
+    if (config.nan_tagging) {
+        return SIGN_BIT | QUIET_NAN | @intFromPtr(obj);
+    } else {
+        return .{ .object = obj };
+    }
 }
 pub fn isObjectType(value: Value, tag: Object.ObjectType) bool {
     return isObject(value) and asObject(value).tag == tag;
