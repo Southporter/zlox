@@ -2,7 +2,9 @@ const std = @import("std");
 const StringPool = @This();
 const Object = @import("Object.zig");
 const Table = @import("Table.zig");
-const Value = @import("values.zig").Value;
+const values = @import("values.zig");
+const Value = values.Value;
+const isNil = values.isNil;
 
 table: Table = undefined,
 
@@ -38,10 +40,7 @@ pub fn find(pool: *StringPool, raw: []const u8) ?*Object.String {
                 return key;
             }
         } else {
-            switch (entry.value) {
-                .nil => return null,
-                else => {},
-            }
+            if (isNil(entry.value)) return null;
         }
 
         index = (index + 1) % cap;

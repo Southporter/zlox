@@ -1,19 +1,17 @@
 const std = @import("std");
 
-// Although this function looks imperative, note that its job is to
-// declaratively construct a build graph that will be executed by an external
-// runner.
 pub fn build(b: *std.Build) void {
-    // Standard target options allows the person running `zig build` to choose
-    // what target to build for. Here we do not override the defaults, which
-    // means any target is allowed, and the default is native. Other options
-    // for restricting supported target set are available.
+    const enable_nan_tagging = b.option(bool, "nanTagging", "Enable NaN tagging");
+
     const target = b.standardTargetOptions(.{});
 
     // Standard optimization options allow the person running `zig build` to select
     // between Debug, ReleaseSafe, ReleaseFast, and ReleaseSmall. Here we do not
     // set a preferred release mode, allowing the user to decide how to optimize.
     const optimize = b.standardOptimizeOption(.{});
+
+    const options = b.addOptions();
+    options.addOption(bool, "nan_tagging", enable_nan_tagging orelse false);
 
     const lib = b.addStaticLibrary(.{
         .name = "zlox",
@@ -23,6 +21,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib.root_module.addOptions("config", options);
 
     // This declares intent for the library to be installed into the standard
     // location when the user invokes the "install" step (the default step when
@@ -36,6 +35,7 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     exe.root_module.addImport("zlox", &lib.root_module);
+    // exe.root_module.addOptions("config", options);
 
     // This declares intent for the executable to be installed into the
     // standard location when the user invokes the "install" step (the default
@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    lib_unit_tests.root_module.addOptions("config", options);
 
     const run_lib_unit_tests = b.addRunArtifact(lib_unit_tests);
 
@@ -91,6 +92,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    exe_unit_tests.root_module.addOptions("config", options);
 
     const run_exe_unit_tests = b.addRunArtifact(exe_unit_tests);
 

@@ -77,7 +77,7 @@ pub fn delete(table: *Table, key: *Object.String) bool {
 
 fn findEntry(table: *Table, key: *Object.String) *Entry {
     const cap = table.entries.len;
-    var index = key.hash % cap;
+    var index = key.hash & (cap - 1);
     var tombstone: ?*Entry = null;
     while (true) {
         const entry = &table.entries[index];
@@ -97,7 +97,7 @@ fn findEntry(table: *Table, key: *Object.String) *Entry {
             }
         }
 
-        index = (index + 1) % cap;
+        index = (index + 1) & (cap - 1);
     }
 }
 

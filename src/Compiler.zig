@@ -352,7 +352,7 @@ fn emitClosure(compiler: *Compiler, function: *Object.Function) !void {
 
 fn makeConstant(compiler: *Compiler, constant: values.Value) !u8 {
     for (compiler.currentChunk().constants.items, 0..) |c, i| {
-        if (c.equal(constant)) {
+        if (values.equal(c, constant)) {
             return @intCast(i);
         }
     }

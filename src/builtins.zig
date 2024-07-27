@@ -8,9 +8,7 @@ const log = std.log.scoped(.builtins);
 
 pub fn clock(arg_count: u8, _: [*]Value, _: *Manager) NativeError!Value {
     std.debug.assert(arg_count == 0);
-    return .{
-        .number = @floatFromInt(std.time.timestamp()),
-    };
+    return vals.numToValue(@floatFromInt(std.time.timestamp()));
 }
 
 pub fn println(arg_count: u8, values: [*]Value, _: *Manager) NativeError!Value {

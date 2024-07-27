@@ -140,7 +140,7 @@ pub fn run(vm: *VM) Error!Value {
             },
             .jump_if_false => {
                 const offset = frame.readShort();
-                if (vm.peek(0).isFalsey().boolean) frame.ip += offset;
+                if (values.isFalsey(vm.peek(0))) frame.ip += offset;
             },
             .jump => {
                 const offset = frame.readShort();
@@ -190,7 +190,7 @@ pub fn run(vm: *VM) Error!Value {
             },
             .inherit => {
                 const superclass = vm.peek(1);
-                if (!superclass.isClass()) {
+                if (!values.isObjectType(superclass, .class)) {
                     vm.runtimeError("Superclass must be a class\n", .{});
                     return error.RuntimeError;
                 }
@@ -251,11 +251,11 @@ pub fn run(vm: *VM) Error!Value {
                 _ = vm.pop();
             },
             .get_property => {
-                if (!vm.peek(0).isInstance()) {
+                if (!values.isObjectType(vm.peek(0), .instance)) {
                     vm.runtimeError("Only instances have properties. {any}\n", .{vm.peek(0)});
                     return error.RuntimeError;
                 }
-                const inst = vm.peek(0).object.as(Object.Instance);
+                const inst = values.asObject(vm.peek(0)).as(Object.Instance);
                 const name = frame.readString();
                 _ = vm.pop(); // Instance
                 if (inst.fields.get(name)) |val| {
@@ -267,11 +267,11 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .set_property => {
-                if (!vm.peek(1).isInstance()) {
+                if (!values.isObjectType(vm.peek(1), .instance)) {
                     vm.runtimeError("Only instances have properties.\n", .{});
                     return error.RuntimeError;
                 }
-                const inst = vm.peek(1).object.as(Object.Instance);
+                const inst = values.asObject(vm.peek(1)).as(Object.Instance);
                 const name = frame.readString();
                 _ = try inst.fields.set(name, vm.peek(0));
                 const val = vm.pop();
@@ -280,7 +280,7 @@ pub fn run(vm: *VM) Error!Value {
             },
             .get_super => {
                 const name = frame.readString();
-                const superclass = vm.pop().object.as(Object.Class);
+                const superclass = values.asObject(vm.pop()).as(Object.Class);
 
                 if (try vm.bindMethod(superclass, name)) |val| {
                     vm.push(val);
@@ -305,37 +305,37 @@ pub fn run(vm: *VM) Error!Value {
                     return error.RuntimeError;
                 },
             },
-            .not => vm.push(vm.pop().isFalsey()),
+            .not => vm.push(values.boolToValue(values.isFalsey(vm.pop()))),
             .equal => {
                 const b = vm.pop();
                 const a = vm.pop();
-                vm.push(.{ .boolean = a.equal(b) });
+                vm.push(values.boolToValue(values.equal(a, b)));
             },
             .add => {
-                if (vm.peek(0).isString() and vm.peek(1).isString()) {
+                if (values.isObjectType(vm.peek(0), .string) and values.isObjectType(vm.peek(1), .string)) {
                     try vm.concatenate();
-                } else if (vm.peek(0).isNumber() and vm.peek(1).isNumber()) {
-                    const b = vm.pop();
-                    const a = vm.pop();
-                    vm.push(.{ .number = a.number + b.number });
+                } else if (values.isNumber(vm.peek(0)) and values.isNumber(vm.peek(1))) {
+                    const b = values.valueToNum(vm.pop());
+                    const a = values.valueToNum(vm.pop());
+                    vm.push(values.numToValue(a + b));
                 } else {
                     vm.runtimeError("Operands must be two numbers or two strings.", .{});
                     return error.RuntimeError;
                 }
             },
             .subtract, .multiply, .divide, .less, .greater => {
-                if (!vm.peek(0).isNumber() or !vm.peek(1).isNumber()) {
+                if (!values.isNumber(vm.peek(0)) or !values.isNumber(vm.peek(1))) {
                     vm.runtimeError("Operands must be numbers.", .{});
                     return error.RuntimeError;
                 }
-                const b = vm.pop();
-                const a = vm.pop();
+                const b = values.valueToNum(vm.pop());
+                const a = values.valueToNum(vm.pop());
                 const result: Value = switch (op) {
-                    .subtract => .{ .number = a.number - b.number },
-                    .multiply => .{ .number = a.number * b.number },
-                    .divide => .{ .number = a.number / b.number },
-                    .less => .{ .boolean = a.number < b.number },
-                    .greater => .{ .boolean = a.number > b.number },
+                    .subtract => values.numToValue(a - b),
+                    .multiply => values.numToValue(a * b),
+                    .divide => values.numToValue(a / b),
+                    .less => values.boolToValue(a < b),
+                    .greater => values.boolToValue(a > b),
                     else => unreachable,
                 };
                 vm.push(result);
@@ -415,11 +415,11 @@ fn invokeFromClass(vm: *VM, class: *Object.Class, name: *Object.String, arg_coun
 
 fn invoke(vm: *VM, name: *Object.String, arg_count: u8) !void {
     const receiver = vm.peek(arg_count);
-    if (!receiver.isInstance()) {
+    if (!values.isObjectType(receiver, .instance)) {
         vm.runtimeError("Only instances have methods.\n", .{});
         return error.RuntimeError;
     }
-    const inst = receiver.object.as(Object.Instance);
+    const inst = values.asObject(receiver).as(Object.Instance);
 
     if (inst.fields.get(name)) |val| {
         var slot = vm.stack_top - arg_count - 1;
@@ -545,7 +545,7 @@ test "basic run" {
     defer vm.deinit();
     var function = try Object.Function.init(vm.manager.allocator());
     var chunk = &function.chunk;
-    const index = try chunk.addConstant(.{ .number = 3.14 });
+    const index = try chunk.addConstant(values.numberToValue(3.14));
     try chunk.writeOp(.constant, 0);
     try chunk.write(index, 0);
     try chunk.writeOp(.@"return", 0);
@@ -553,7 +553,7 @@ test "basic run" {
     try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
-    try std.testing.expectEqual(3.14, res.number);
+    try std.testing.expectEqual(3.14, values.valueToNum(res));
 }
 
 test "basic arithmatic" {
@@ -565,10 +565,10 @@ test "basic arithmatic" {
 
     const pi = 3.1415926;
     try chunk.writeOp(.constant, 0);
-    const pi_index = try chunk.addConstant(.{ .number = pi });
+    const pi_index = try chunk.addConstant(values.numberToValue(pi));
     try chunk.write(pi_index, 0);
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(.{ .number = 2.0 });
+    const two_index = try chunk.addConstant(values.numberToValue(2.0));
     try chunk.write(two_index, 0);
     try chunk.writeOp(.multiply, 0);
     try chunk.writeOp(.constant, 0);
@@ -584,7 +584,7 @@ test "basic arithmatic" {
     try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
-    try std.testing.expectEqual(-pi, res.number);
+    try std.testing.expectEqual(-pi, values.valueToNum(res));
 }
 
 test "boolean logic" {
@@ -599,7 +599,7 @@ test "boolean logic" {
     try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
-    try std.testing.expectEqual(Value{ .boolean = false }, res);
+    try std.testing.expectEqual(values.FALSE_VAL, res);
 }
 test "Comparison: less" {
     var vm: VM = undefined;
@@ -610,11 +610,11 @@ test "Comparison: less" {
 
     const two = 2.0;
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(.{ .number = two });
+    const two_index = try chunk.addConstant(values.numToValue(two));
     try chunk.write(two_index, 0);
     const three = 3.0;
     try chunk.writeOp(.constant, 0);
-    const three_index = try chunk.addConstant(.{ .number = three });
+    const three_index = try chunk.addConstant(values.numToValue(three));
     try chunk.write(three_index, 0);
 
     try chunk.writeOp(.less, 0);
@@ -622,7 +622,7 @@ test "Comparison: less" {
     try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
-    try std.testing.expectEqual(Value{ .boolean = true }, res);
+    try std.testing.expectEqual(values.TRUE_VAL, res);
 }
 test "Comparison: greater" {
     var vm: VM = undefined;
@@ -633,11 +633,11 @@ test "Comparison: greater" {
 
     const two = 2.0;
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(.{ .number = two });
+    const two_index = try chunk.addConstant(values.numToValue(two));
     try chunk.write(two_index, 0);
     const three = 3.0;
     try chunk.writeOp(.constant, 0);
-    const three_index = try chunk.addConstant(.{ .number = three });
+    const three_index = try chunk.addConstant(values.numToValue(three));
     try chunk.write(three_index, 0);
 
     try chunk.writeOp(.greater, 0);
@@ -645,7 +645,7 @@ test "Comparison: greater" {
     try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
-    try std.testing.expectEqual(Value{ .boolean = false }, res);
+    try std.testing.expectEqual(values.FALSE_VAL, res);
 }
 test "Equality" {
     var vm: VM = undefined;
@@ -656,11 +656,11 @@ test "Equality" {
 
     const two = 2.0;
     try chunk.writeOp(.constant, 0);
-    const two_index = try chunk.addConstant(.{ .number = two });
+    const two_index = try chunk.addConstant(values.numToValue(two));
     try chunk.write(two_index, 0);
     const three = 3.0;
     try chunk.writeOp(.constant, 0);
-    const three_index = try chunk.addConstant(.{ .number = three });
+    const three_index = try chunk.addConstant(values.numToValue(three));
     try chunk.write(three_index, 0);
 
     try chunk.writeOp(.equal, 0);
@@ -672,7 +672,7 @@ test "Equality" {
     try chunk.writeOp(.@"return", 0);
 
     const res = try vm.interpretFunction(function);
-    try std.testing.expectEqual(Value{ .boolean = false }, res);
+    try std.testing.expectEqual(values.FALSE_VAL, res);
 }
 test "Chapter 18 end" {
     const input =
@@ -683,7 +683,7 @@ test "Chapter 18 end" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqual(Value{ .boolean = true }, res);
+    try std.testing.expectEqual(values.TRUE_VAL, res);
 }
 
 test "Chapter 19" {
@@ -695,9 +695,9 @@ test "Chapter 19" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    const str_res = res.object.as(Object.String);
+    const str_res = values.asObject(res).as(Object.String);
     try std.testing.expectEqualStrings("Hello World!", str_res.data);
-    try std.testing.expectEqual(res.object, vm.manager.objects.?);
+    try std.testing.expectEqual(values.asObject(res), vm.manager.objects.?);
 }
 
 test "Chapter 20: String equality" {
@@ -710,7 +710,7 @@ test "Chapter 20: String equality" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expect(res.boolean);
+    try std.testing.expect(values.asBool(res));
     try std.testing.expect(null != vm.manager.objects.?.next);
 }
 
@@ -729,7 +729,7 @@ test "Chapter 21: Globals" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings(expected, res.object.as(Object.String).data);
+    try std.testing.expectEqualStrings(expected, values.asObject(res).as(Object.String).data);
     try std.testing.expect(vm.manager.objects != null);
 }
 
@@ -750,8 +750,8 @@ test "Chapter 23: If true" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqual(Object.ObjectType.string, res.object.tag);
-    try std.testing.expectEqualStrings(expected, res.object.as(Object.String).data);
+    try std.testing.expectEqual(Object.ObjectType.string, values.asObject(res).tag);
+    try std.testing.expectEqualStrings(expected, values.asObject(res).as(Object.String).data);
 }
 
 test "Chapter 23: If false" {
@@ -771,7 +771,7 @@ test "Chapter 23: If false" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings(expected, res.object.as(Object.String).data);
+    try std.testing.expectEqualStrings(expected, values.asObject(res).as(Object.String).data);
 }
 test "Chapter 23: If no else" {
     const input =
@@ -802,7 +802,7 @@ test "Chapter 23: while" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqual(128, res.number);
+    try std.testing.expectEqual(128, values.valueToNum(res));
 }
 
 test "Chapter 23: normal fun" {
@@ -818,7 +818,7 @@ test "Chapter 23: normal fun" {
     vm.init(std.testing.allocator);
     defer vm.deinit();
     const res = try vm.interpret(input);
-    try std.testing.expectEqual(6, res.number);
+    try std.testing.expectEqual(6, values.valueToNum(res));
 }
 
 test "Chapter 23: bad fun" {
@@ -868,7 +868,7 @@ test "Chapter 25: Closure upvalues" {
     defer vm.deinit();
 
     const res = try vm.interpret(input);
-    try std.testing.expectEqual(10, res.number);
+    try std.testing.expectEqual(10, values.valueToNum(res));
 }
 
 test "Chapter 27: Classes and Instances" {
@@ -887,7 +887,7 @@ test "Chapter 27: Classes and Instances" {
     defer vm.deinit();
 
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings("success", res.object.as(Object.String).data);
+    try std.testing.expectEqualStrings("success", values.asObject(res).as(Object.String).data);
 }
 
 test "Chapter 27: Invalid set properties" {
@@ -963,7 +963,7 @@ test "Chapter 28: Methods" {
     defer vm.deinit();
 
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings("success", res.object.as(Object.String).data);
+    try std.testing.expectEqualStrings("success", values.asObject(res).as(Object.String).data);
 }
 
 test "Chapter 28: Invoking fields" {
@@ -988,7 +988,7 @@ test "Chapter 28: Invoking fields" {
     defer vm.deinit();
 
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings("not a method", res.object.as(Object.String).data);
+    try std.testing.expectEqualStrings("not a method", values.asObject(res).as(Object.String).data);
 }
 
 test "Chapter 29: Super methods" {
@@ -1020,5 +1020,5 @@ test "Chapter 29: Super methods" {
     defer vm.deinit();
 
     const res = try vm.interpret(input);
-    try std.testing.expectEqualStrings("A method", res.object.as(Object.String).data);
+    try std.testing.expectEqualStrings("A method", values.asObject(res).as(Object.String).data);
 }

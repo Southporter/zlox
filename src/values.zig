@@ -1,78 +1,143 @@
 const std = @import("std");
+const config = @import("config");
 const Object = @import("Object.zig");
 const debug = @import("debug.zig");
 
-pub const TRUE_VAL = Value{ .boolean = true };
-pub const FALSE_VAL = Value{ .boolean = false };
-pub const NIL_VAL = Value{ .nil = {} };
+const TAG_NIL = 1;
+const TAG_FALSE = 2;
+const TAG_TRUE = 3;
+
+pub const TRUE_VAL = if (config.nan_tagging) @as(Value, QUIET_NAN | TAG_TRUE) else Value{ .boolean = true };
+pub const FALSE_VAL = if (config.nan_tagging) @as(Value, QUIET_NAN | TAG_FALSE) else Value{ .boolean = false };
+pub const NIL_VAL = if (config.nan_tagging) @as(Value, QUIET_NAN | TAG_NIL) else Value{ .nil = {} };
 pub const ValueTag = enum {
     nil,
     boolean,
     number,
     object,
 };
-pub const Value = union(ValueTag) {
-    nil: void,
-    boolean: bool,
-    number: f64,
-    object: *Object,
+const QUIET_NAN: u64 = 0x7ffc000000000000;
+const SIGN_BIT: u64 = 0x8000000000000000;
 
-    pub fn isNumber(value: *const Value) bool {
-        return switch (value.*) {
+pub fn numToValue(number: f64) Value {
+    return if (config.nan_tagging) @bitCast(number) else .{
+        .number = number,
+    };
+}
+pub fn valueToNum(value: Value) f64 {
+    return if (config.nan_tagging) @bitCast(value) else value.number;
+}
+
+pub fn asNumber(value: Value) f64 {
+    return valueToNum(value);
+}
+pub fn isNumber(value: Value) bool {
+    if (config.nan_tagging) {
+        return value & QUIET_NAN != QUIET_NAN;
+    } else {
+        return switch (value) {
             .number => true,
             else => false,
         };
     }
-    pub fn isBoolean(value: *const Value) bool {
-        return switch (value.*) {
+}
+
+pub fn isNil(value: Value) bool {
+    if (config.nan_tagging) {
+        return value == NIL_VAL;
+    } else {
+        return switch (value) {
+            .nil => true,
+            else => false,
+        };
+    }
+}
+pub fn asBool(value: Value) bool {
+    if (config.nan_tagging) {
+        return value == TRUE_VAL;
+    } else {
+        return value.boolean;
+    }
+}
+pub fn boolToValue(b: bool) Value {
+    return if (b) TRUE_VAL else FALSE_VAL;
+}
+pub fn isBool(value: Value) bool {
+    if (config.nan_tagging) {
+        return (value | 1) == TRUE_VAL;
+    } else {
+        return switch (value) {
             .boolean => true,
             else => false,
         };
     }
-    pub fn isFalsey(value: *const Value) Value {
-        return switch (value.*) {
-            .nil => TRUE_VAL,
-            .boolean => |val| if (val) FALSE_VAL else TRUE_VAL,
-            else => FALSE_VAL,
-        };
-    }
-    pub fn isString(value: *const Value) bool {
-        return switch (value.*) {
-            .object => |obj| obj.tag == .string,
-            else => false,
-        };
-    }
+}
 
-    pub fn isInstance(value: *const Value) bool {
-        return switch (value.*) {
-            .object => |obj| obj.tag == .instance,
+pub fn isObject(value: Value) bool {
+    if (config.nan_tagging) {
+        return (value & (QUIET_NAN | SIGN_BIT)) == (QUIET_NAN | SIGN_BIT);
+    } else {
+        return switch (value) {
+            .object => true,
             else => false,
         };
     }
-    pub fn isClass(value: *const Value) bool {
-        return switch (value.*) {
-            .object => |obj| obj.tag == .class,
-            else => false,
-        };
+}
+pub fn asObject(value: Value) *Object {
+    if (config.nan_tagging) {
+        const address = value & ~(SIGN_BIT | QUIET_NAN);
+        return @ptrFromInt(address);
+    } else {
+        return value.object;
     }
-    pub fn unwrap(value: *const Value) Value {
-        return switch (value.*) {
-            .object => |obj| switch (obj.tag) {
-                .upvalue => obj.as(Object.Upvalue).closed,
-                else => value.*,
-            },
-            else => |val| val,
-        };
+}
+pub fn objectToValue(obj: *Object) Value {
+    if (config.nan_tagging) {}
+}
+pub fn isObjectType(value: Value, tag: Object.ObjectType) bool {
+    return isObject(value) and asObject(value).tag == tag;
+}
+
+pub fn isFalsey(value: Value) bool {
+    if (isNil(value)) {
+        return true;
+    } else if (isBool(value)) {
+        return if (asBool(value)) false else true;
+    } else {
+        return false;
     }
-    pub fn equal(a: *const Value, b: Value) bool {
-        if (std.meta.activeTag(a.*) != std.meta.activeTag(b)) return false;
-        return switch (a.*) {
+}
+pub fn unwrap(value: Value) Value {
+    return switch (value) {
+        .object => |obj| switch (obj.tag) {
+            .upvalue => obj.as(Object.Upvalue).closed,
+            else => value,
+        },
+        else => |val| val,
+    };
+}
+pub fn equal(a: Value, b: Value) bool {
+    if (config.nan_tagging) {
+        if (isNumber(a) and isNumber(b)) {
+            return valueToNum(a) == valueToNum(b);
+        }
+        return a == b;
+    } else {
+        if (std.meta.activeTag(a) != std.meta.activeTag(b)) return false;
+        return switch (a) {
             .nil => true,
             .boolean => |val| val == b.boolean,
             .number => |val| val == b.number,
             .object => |obj| obj == b.object,
         };
     }
+}
+
+pub const Value = if (config.nan_tagging) u64 else union(ValueTag) {
+    nil: void,
+    boolean: bool,
+    number: f64,
+    object: *Object,
 
     pub fn format(value: Value, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
         _ = fmt;
@@ -87,11 +152,23 @@ pub const ValueArray = std.ArrayListUnmanaged(Value);
 const Printer = *const fn (comptime []const u8, anytype) void;
 
 pub fn print(value: Value, printer: Printer) void {
-    switch (value) {
-        .number => printer("{d}", .{value.number}),
-        .boolean => printer("{}", .{value.boolean}),
-        .nil => printer("nil", .{}),
-        .object => printObject(value.object, printer),
+    if (config.nan_tagging) {
+        if (isBool(value)) {
+            printer("{}", .{asBool(value)});
+        } else if (isNil(value)) {
+            printer("nil", .{});
+        } else if (isNumber(value)) {
+            printer("{d}", .{valueToNum(value)});
+        } else if (isObject(value)) {
+            printObject(asObject(value));
+        }
+    } else {
+        switch (value) {
+            .number => printer("{d}", .{value.number}),
+            .boolean => printer("{}", .{value.boolean}),
+            .nil => printer("nil", .{}),
+            .object => printObject(value.object, printer),
+        }
     }
 }
 
