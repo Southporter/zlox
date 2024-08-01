@@ -191,7 +191,7 @@ pub fn run(vm: *VM) Error!Value {
             .inherit => {
                 const superclass = vm.peek(1);
                 if (!superclass.isClass()) {
-                    vm.runtimeError("Superclass must be a class\n", .{});
+                    vm.runtimeError("Superclass must be a class.\n", .{});
                     return error.RuntimeError;
                 }
                 const subclass = vm.peek(0).object.as(Object.Class);
@@ -217,7 +217,7 @@ pub fn run(vm: *VM) Error!Value {
                 if (value) |val| {
                     vm.push(val);
                 } else {
-                    vm.runtimeError("Undefined variable '{s}'.", .{name.data});
+                    vm.runtimeError("Undefined variable '{s}'.\n", .{name.data});
                     return error.RuntimeError;
                 }
             },
@@ -226,7 +226,7 @@ pub fn run(vm: *VM) Error!Value {
                 const is_new = try vm.globals.set(name, vm.peek(0));
                 if (is_new) {
                     _ = vm.globals.delete(name);
-                    vm.runtimeError("Undefined variable '{s}'.", .{name.data});
+                    vm.runtimeError("Undefined variable '{s}'.\n", .{name.data});
                     return error.RuntimeError;
                 }
             },
@@ -252,13 +252,13 @@ pub fn run(vm: *VM) Error!Value {
             },
             .get_property => {
                 if (!vm.peek(0).isInstance()) {
-                    vm.runtimeError("Only instances have properties. {any}\n", .{vm.peek(0)});
+                    vm.runtimeError("Only instances have properties.\n", .{});
                     return error.RuntimeError;
                 }
                 const inst = vm.peek(0).object.as(Object.Instance);
                 const name = frame.readString();
-                _ = vm.pop(); // Instance
                 if (inst.fields.get(name)) |val| {
+                    _ = vm.pop(); // Instance
                     vm.push(val);
                 } else if (try vm.bindMethod(inst.class, name)) |val| {
                     vm.push(val);
@@ -268,7 +268,7 @@ pub fn run(vm: *VM) Error!Value {
             },
             .set_property => {
                 if (!vm.peek(1).isInstance()) {
-                    vm.runtimeError("Only instances have properties.\n", .{});
+                    vm.runtimeError("Only instances have fields.\n", .{});
                     return error.RuntimeError;
                 }
                 const inst = vm.peek(1).object.as(Object.Instance);
@@ -289,7 +289,7 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .print => {
-                values.print(vm.pop(), log.warn);
+                log.warn("{any}\n", .{vm.pop()});
             },
             .pop => _ = vm.pop(),
             .true => vm.push(values.TRUE_VAL),
@@ -301,7 +301,7 @@ pub fn run(vm: *VM) Error!Value {
                     value.number = -value.number;
                 },
                 .boolean, .nil, .object => {
-                    vm.runtimeError("Operand must be a number.", .{});
+                    vm.runtimeError("Operand must be a number.\n", .{});
                     return error.RuntimeError;
                 },
             },
@@ -319,13 +319,13 @@ pub fn run(vm: *VM) Error!Value {
                     const a = vm.pop();
                     vm.push(.{ .number = a.number + b.number });
                 } else {
-                    vm.runtimeError("Operands must be two numbers or two strings.", .{});
+                    vm.runtimeError("Operands must be two numbers or two strings.\n", .{});
                     return error.RuntimeError;
                 }
             },
             .subtract, .multiply, .divide, .less, .greater => {
                 if (!vm.peek(0).isNumber() or !vm.peek(1).isNumber()) {
-                    vm.runtimeError("Operands must be numbers.", .{});
+                    vm.runtimeError("Operands must be numbers.\n", .{});
                     return error.RuntimeError;
                 }
                 const b = vm.pop();
@@ -386,7 +386,7 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
                     return vm.call(val.object.as(Object.Closure), arg_count);
                 } else if (arg_count != 0) {
                     // Empty constructor has too many args
-                    vm.runtimeError("Constructor expected 0 arguments but got {d}\n", .{arg_count});
+                    vm.runtimeError("Expected 0 arguments but got {d}.\n", .{arg_count});
                     return error.RuntimeError;
                 }
                 return;
@@ -400,7 +400,7 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
             else => {},
         }
     }
-    vm.runtimeError("Can only call functions and classes.", .{});
+    vm.runtimeError("Can only call functions and classes.\n", .{});
     return error.RuntimeError;
 }
 
@@ -408,7 +408,7 @@ fn invokeFromClass(vm: *VM, class: *Object.Class, name: *Object.String, arg_coun
     if (class.methods.get(name)) |method| {
         return vm.call(method.object.as(Object.Closure), arg_count);
     } else {
-        vm.runtimeError("Undefined property: '{s}'\n", .{name.data});
+        vm.runtimeError("Undefined property '{s}'.\n", .{name.data});
         return error.RuntimeError;
     }
 }
@@ -435,7 +435,8 @@ fn bindMethod(vm: *VM, class: *Object.Class, name: *Object.String) !?Value {
         _ = vm.pop();
         return .{ .object = &bound.object };
     } else {
-        return null;
+        vm.runtimeError("Undefined property '{s}'.\n", .{name.data});
+        return error.RuntimeError;
     }
 }
 
@@ -931,7 +932,7 @@ test "Chapter 27: Undefined properties" {
     defer vm.deinit();
 
     const res = vm.interpret(input);
-    try std.testing.expectEqual(values.NIL_VAL, res);
+    try std.testing.expectError(error.RuntimeError, res);
 }
 
 test "Chapter 28: Methods" {

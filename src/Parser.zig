@@ -43,7 +43,7 @@ pub fn synchronize(parser: *Parser) void {
 
     while (parser.current.?.tag != .eof) {
         if (parser.previous.?.tag == .semicolon) return;
-        switch (parser.previous.?.tag) {
+        switch (parser.current.?.tag) {
             .class, .fun, .@"var", .@"for", .@"if", .@"while", .print, .@"return" => return,
             else => {},
         }

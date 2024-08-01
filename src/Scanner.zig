@@ -113,7 +113,7 @@ pub fn next(scanner: *Scanner) ?Token {
         '<' => scanner.makeToken(if (scanner.match('=')) .less_equal else .less),
         '>' => scanner.makeToken(if (scanner.match('=')) .greater_equal else .greater),
         '"' => scanner.string(),
-        else => scanner.errorToken("Unexpected character"),
+        else => scanner.errorToken("Unexpected character."),
     };
 }
 
@@ -132,9 +132,9 @@ fn match(scanner: *Scanner, char: u8) bool {
 fn peek(scanner: *Scanner) u8 {
     return scanner.source[scanner.current];
 }
-fn peekNext(scanner: *Scanner) u8 {
-    if (scanner.isAtEnd()) {
-        return 0;
+fn peekNext(scanner: *Scanner) ?u8 {
+    if (scanner.current + 1 >= scanner.source.len) {
+        return null;
     }
     return scanner.source[scanner.current + 1];
 }
@@ -154,8 +154,9 @@ fn skipWhitespace(scanner: *Scanner) void {
                 _ = scanner.advance();
             },
             '/' => {
-                if (scanner.peekNext() == '/') {
-                    while (scanner.peek() != '\n' and !scanner.isAtEnd()) : (_ = scanner.advance()) {}
+                const next_tok = scanner.peekNext();
+                if (next_tok != null and next_tok.? == '/') {
+                    while (!scanner.isAtEnd() and scanner.peek() != '\n') : (_ = scanner.advance()) {}
                 } else {
                     return;
                 }
@@ -166,13 +167,13 @@ fn skipWhitespace(scanner: *Scanner) void {
 }
 
 fn string(scanner: *Scanner) Token {
-    while (scanner.peek() != '"' and !scanner.isAtEnd()) : (_ = scanner.advance()) {
+    while (!scanner.isAtEnd() and scanner.peek() != '"') : (_ = scanner.advance()) {
         if (scanner.peek() == '\n') {
             scanner.line += 1;
         }
     }
     if (scanner.isAtEnd()) {
-        return scanner.errorToken("Unterminated string");
+        return scanner.errorToken("Unterminated string.");
     }
     _ = scanner.advance();
     return scanner.makeToken(.string);
@@ -181,7 +182,7 @@ fn string(scanner: *Scanner) Token {
 fn number(scanner: *Scanner) Token {
     while (isDigit(scanner.peek())) : (_ = scanner.advance()) {}
 
-    if (scanner.peek() == '.' and isDigit(scanner.peekNext())) {
+    if (scanner.peek() == '.' and isDigit(scanner.peekNext() orelse 'a')) {
         _ = scanner.advance();
 
         while (isDigit(scanner.peek())) : (_ = scanner.advance()) {}

@@ -13,7 +13,6 @@ pub fn logFn(
     comptime format: []const u8,
     args: anytype,
 ) void {
-    _ = level;
     _ = scope;
     // Ignore all non-error logging from sources other than
     // .my_project, .nice_library and the default
@@ -26,12 +25,22 @@ pub fn logFn(
     // } ++ "): ";
 
     // const prefix = "[" ++ comptime level.asText() ++ "] " ++ scope_prefix;
+    //
+    switch (level) {
+        .err => {
+            std.debug.lockStdErr();
+            defer std.debug.unlockStdErr();
 
-    // Print the message to stderr, silently ignoring any errors
-    std.debug.lockStdErr();
-    defer std.debug.unlockStdErr();
-    const stderr = std.io.getStdErr().writer();
-    nosuspend stderr.print(format, args) catch return;
+            const writer = std.io.getStdErr().writer();
+            nosuspend writer.print(format, args) catch return;
+        },
+        else => {
+            // Print the message to stderr, silently ignoring any errors
+            const stdout = std.io.getStdOut();
+            const writer = stdout.writer();
+            nosuspend writer.print(format, args) catch return;
+        },
+    }
 }
 
 pub fn main() !void {

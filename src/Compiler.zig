@@ -77,19 +77,7 @@ const Precedence = enum {
     primary,
 
     fn increment(current: Precedence) Precedence {
-        return switch (current) {
-            .none => .assignment,
-            .assignment => .@"or",
-            .@"or" => .@"and",
-            .@"and" => .equality,
-            .equality => .comparison,
-            .comparison => .term,
-            .term => .factor,
-            .factor => .unary,
-            .unary => .call,
-            .call => .primary,
-            .primary => .primary,
-        };
+        return @enumFromInt(@intFromEnum(current) + 1);
     }
 
     fn greater(current: Precedence, next: Precedence) bool {
@@ -101,7 +89,7 @@ const Precedence = enum {
     }
 };
 
-pub const CompileError = error{ConstantOverflow} || std.mem.Allocator.Error || std.fmt.ParseFloatError;
+pub const CompileError = error{ ConstantOverflow, ArgOverflow } || std.mem.Allocator.Error || std.fmt.ParseFloatError;
 
 const ParseFn = *const fn (*Compiler, bool) CompileError!void;
 
@@ -118,6 +106,11 @@ const rules = blk: {
         .infix = call,
         .precedence = .call,
     });
+    map.set(.dot, ParseRule{
+        .infix = dot,
+        .precedence = .call,
+    });
+
     map.set(.minus, ParseRule{
         .prefix = unary,
         .infix = binary,
@@ -135,30 +128,7 @@ const rules = blk: {
         .infix = binary,
         .precedence = .factor,
     });
-    map.set(.number, ParseRule{
-        .prefix = number,
-        .precedence = .primary,
-    });
-    map.set(.string, ParseRule{
-        .prefix = string,
-        .precedence = .primary,
-    });
-    map.set(.identifier, ParseRule{
-        .prefix = variable,
-    });
-    map.set(.true, ParseRule{
-        .prefix = literal,
-    });
-    map.set(.false, ParseRule{
-        .prefix = literal,
-    });
-    map.set(.nil, ParseRule{
-        .prefix = literal,
-    });
-    map.set(.dot, ParseRule{
-        .infix = dot,
-        .precedence = .call,
-    });
+
     map.set(.bang, ParseRule{
         .prefix = unary,
     });
@@ -166,6 +136,7 @@ const rules = blk: {
         .infix = binary,
         .precedence = .equality,
     });
+
     map.set(.equal_equal, ParseRule{
         .infix = binary,
         .precedence = .equality,
@@ -186,6 +157,17 @@ const rules = blk: {
         .infix = binary,
         .precedence = .comparison,
     });
+
+    map.set(.identifier, ParseRule{
+        .prefix = variable,
+    });
+    map.set(.string, ParseRule{
+        .prefix = string,
+    });
+    map.set(.number, ParseRule{
+        .prefix = number,
+    });
+
     map.set(.@"and", ParseRule{
         .infix = and_,
         .precedence = .@"and",
@@ -194,6 +176,17 @@ const rules = blk: {
         .infix = or_,
         .precedence = .@"or",
     });
+
+    map.set(.true, ParseRule{
+        .prefix = literal,
+    });
+    map.set(.false, ParseRule{
+        .prefix = literal,
+    });
+    map.set(.nil, ParseRule{
+        .prefix = literal,
+    });
+
     map.set(.this, ParseRule{
         .prefix = this,
     });
@@ -212,6 +205,7 @@ fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!voi
     compiler.parser.advance();
     const can_assign = precedence.lessOrEqual(.assignment);
     log.debug("(compiler) Can assign? {} assignment > {s}\n", .{ can_assign, @tagName(precedence) });
+
     const prefix_fn = getRule(compiler.parser.previous.?.tag).prefix;
     log.debug("(compiler) Parsing prefix: {s} = {any}\n", .{ @tagName(compiler.parser.previous.?.tag), prefix_fn });
     if (prefix_fn) |prefix| {
@@ -221,17 +215,18 @@ fn parsePrecedence(compiler: *Compiler, precedence: Precedence) CompileError!voi
         return;
     }
 
-    while (getRule(compiler.parser.current.?.tag).precedence.greater(precedence)) {
+    while (precedence.lessOrEqual(getRule(compiler.parser.current.?.tag).precedence)) {
         compiler.parser.advance();
         const infix_fn = getRule(compiler.parser.previous.?.tag).infix;
         log.debug("(compiler) Parsing infix: {s} = {?}\n", .{ @tagName(compiler.parser.previous.?.tag), infix_fn });
         if (infix_fn) |infix| {
             try infix(compiler, can_assign);
-        } else if (can_assign and compiler.parser.match(.equal)) {
-            compiler.parser.err("Invalid assignment target.");
         } else {
-            compiler.parser.err("Expected infix.");
+            compiler.parser.err("Expect infix.");
         }
+    }
+    if (can_assign and compiler.parser.match(.equal)) {
+        compiler.parser.err("Invalid assignment target.");
     }
 }
 
@@ -289,6 +284,7 @@ fn endCompilation(compiler: *Compiler) !*Object.Function {
 }
 
 fn emitOp(compiler: *Compiler, op: Chunk.Opcode) !void {
+    log.debug("Emitting op: {s}\n", .{@tagName(op)});
     try compiler.currentChunk().writeOp(op, compiler.parser.previous.?.line);
 }
 fn emitByte(compiler: *Compiler, byte: u8) !void {
@@ -378,6 +374,8 @@ fn declaration(compiler: *Compiler) CompileError!void {
     } else {
         try compiler.statement();
     }
+
+    if (compiler.parser.panic_mode) compiler.parser.synchronize();
 }
 
 fn varDeclaration(compiler: *Compiler) CompileError!void {
@@ -419,7 +417,7 @@ fn classDeclaration(compiler: *Compiler) CompileError!void {
         try compiler.variable(false);
 
         if (std.mem.eql(u8, class_name.raw, compiler.parser.previous.?.raw)) {
-            compiler.parser.err("A class cannot inherit from itself.");
+            compiler.parser.err("A class can't inherit from itself.");
         }
 
         compiler.beginScope();
@@ -445,6 +443,7 @@ fn classDeclaration(compiler: *Compiler) CompileError!void {
 }
 
 fn parseVariable(compiler: *Compiler, msg: []const u8) CompileError!u8 {
+    log.debug("Parsing variable: {any}\n", .{compiler.parser.previous.?});
     compiler.parser.consume(.identifier, msg);
     const name = compiler.parser.previous.?;
 
@@ -474,7 +473,11 @@ fn declareVariable(compiler: *Compiler) void {
     if (compiler.scope_depth == 0) return;
 
     const name = compiler.parser.previous.?;
-    for (compiler.locals[0..compiler.local_count]) |local| {
+    // for (compiler.locals[0..compiler.local_count]) |local| {
+    //
+    var i = compiler.local_count - 1;
+    while (i >= 0) : (i -= 1) {
+        const local = compiler.locals[i];
         if (local.depth < compiler.scope_depth) {
             break;
         }
@@ -488,7 +491,7 @@ fn declareVariable(compiler: *Compiler) void {
 
 fn addLocal(compiler: *Compiler, name: Scanner.Token) void {
     if (compiler.local_count == MAX_LOCALS) {
-        compiler.parser.err("TOO many local variables in function.");
+        compiler.parser.err("Too many local variables in function.");
         return;
     }
     defer compiler.local_count += 1;
@@ -631,9 +634,9 @@ fn printStatement(compiler: *Compiler) CompileError!void {
 }
 
 fn ifStatement(compiler: *Compiler) CompileError!void {
-    compiler.parser.consume(.left_paren, "Expected '(' after 'if'.");
+    compiler.parser.consume(.left_paren, "Expect '(' after 'if'.");
     try compiler.expression();
-    compiler.parser.consume(.right_paren, "Expected ')' after 'if'.");
+    compiler.parser.consume(.right_paren, "Expect ')' after 'if'.");
 
     const then_jump = try compiler.emitJump(.jump_if_false);
     try compiler.emitOp(.pop);
@@ -649,9 +652,9 @@ fn ifStatement(compiler: *Compiler) CompileError!void {
 
 fn whileStatement(compiler: *Compiler) CompileError!void {
     const loop_start = compiler.currentChunk().count;
-    compiler.parser.consume(.left_paren, "Expected '(' after 'while'.");
+    compiler.parser.consume(.left_paren, "Expect '(' after 'while'.");
     try compiler.expression();
-    compiler.parser.consume(.right_paren, "Expected ')' after while clause.");
+    compiler.parser.consume(.right_paren, "Expect ')' after while clause.");
 
     const exit_jump = try compiler.emitJump(.jump_if_false);
     try compiler.emitOp(.pop);
@@ -662,7 +665,7 @@ fn whileStatement(compiler: *Compiler) CompileError!void {
 }
 fn forStatement(compiler: *Compiler) CompileError!void {
     compiler.beginScope();
-    compiler.parser.consume(.left_paren, "Expected '(' after 'for'.");
+    compiler.parser.consume(.left_paren, "Expect '(' after 'for'.");
     if (compiler.parser.match(.semicolon)) {
         // No initializer
     } else if (compiler.parser.match(.@"var")) {
@@ -670,25 +673,26 @@ fn forStatement(compiler: *Compiler) CompileError!void {
     } else {
         try compiler.expressionStatement();
     }
+
     var loop_start = compiler.currentChunk().count;
     var exit_jump: usize = std.math.maxInt(usize);
 
     if (!compiler.parser.match(.semicolon)) {
         // Condition clause
         try compiler.expression();
-        compiler.parser.consume(.semicolon, "Expected ';'.");
+        compiler.parser.consume(.semicolon, "Expect ';'.");
 
         exit_jump = try compiler.emitJump(.jump_if_false);
         try compiler.emitOp(.pop);
     }
 
-    if (!compiler.parser.match(.semicolon)) {
+    if (!compiler.parser.match(.right_paren)) {
         // Increment clause
         const body_jump = try compiler.emitJump(.jump);
         const increment_start = compiler.currentChunk().count;
         try compiler.expression();
         try compiler.emitOp(.pop);
-        compiler.parser.consume(.right_paren, "Expected ')' after for clause.");
+        compiler.parser.consume(.right_paren, "Expect ')' after for clause.");
 
         try compiler.emitLoop(loop_start);
         loop_start = increment_start;
@@ -710,7 +714,7 @@ fn block(compiler: *Compiler) CompileError!void {
         try compiler.declaration();
     }
 
-    compiler.parser.consume(.right_brace, "Expected '}' after block.");
+    compiler.parser.consume(.right_brace, "Expect '}' after block.");
 }
 
 fn returnStatement(compiler: *Compiler) CompileError!void {
@@ -718,7 +722,7 @@ fn returnStatement(compiler: *Compiler) CompileError!void {
         try compiler.emitReturn();
     } else {
         if (compiler.function_type == .initializer) {
-            compiler.parser.err("Cannot return a value from an initializer.");
+            compiler.parser.err("Can't return a value from an initializer.");
         }
         try compiler.expression();
         compiler.parser.consume(.semicolon, "Expect ';' after value.");
@@ -753,7 +757,7 @@ fn variable(compiler: *Compiler, can_assign: bool) CompileError!void {
 
 fn this(compiler: *Compiler, _: bool) CompileError!void {
     if (compiler.current_class == null) {
-        compiler.parser.err("Can't use 'this' outside of a class");
+        compiler.parser.err("Can't use 'this' outside of a class.");
         return;
     }
     try compiler.variable(false);
@@ -765,8 +769,8 @@ fn super(compiler: *Compiler, _: bool) CompileError!void {
     } else if (!compiler.current_class.?.has_superclass) {
         compiler.parser.err("Can't use 'super' in a class with no superclass.");
     }
-    compiler.parser.consume(.dot, "Expected '.' after 'super'.");
-    compiler.parser.consume(.identifier, "Expected superclass method name.");
+    compiler.parser.consume(.dot, "Expect '.' after 'super'.");
+    compiler.parser.consume(.identifier, "Expect superclass method name.");
     const name = try compiler.identifierConstant(compiler.parser.previous.?);
 
     try compiler.namedVariable(syntheticToken("this"), false);
@@ -787,7 +791,7 @@ fn call(compiler: *Compiler, _: bool) CompileError!void {
 }
 
 fn dot(compiler: *Compiler, can_assign: bool) CompileError!void {
-    compiler.parser.consume(.identifier, "Expected property name after '.'.");
+    compiler.parser.consume(.identifier, "Expect property name after '.'.");
     const name = try compiler.identifierConstant(compiler.parser.previous.?);
 
     if (can_assign and compiler.parser.match(.equal)) {
@@ -810,18 +814,19 @@ fn argList(compiler: *Compiler) CompileError!u8 {
         while (compiler.parser.match(.comma)) : (arg_count += 1) {
             try compiler.expression();
             if (arg_count == 255) {
-                compiler.parser.err("Can't have more than 255 arguments");
+                compiler.parser.err("Can't have more than 255 arguments.");
+                return error.ArgOverflow;
             }
         }
     }
-    compiler.parser.consume(.right_paren, "Expected ')' after arguments.");
+    compiler.parser.consume(.right_paren, "Expect ')' after arguments.");
     return arg_count;
 }
 
 fn arg(compiler: *Compiler) CompileError!void {
     compiler.function.arity += 1;
     if (compiler.function.arity > 255) {
-        compiler.parser.errorAtCurrent("Can't have more than 255 function parameters.");
+        compiler.parser.errorAtCurrent("Can't have more than 255 parameters.");
     }
     const constant = try compiler.parseVariable("Expect parameter name.");
     try compiler.defineVariable(constant);
@@ -849,7 +854,7 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
 
     try fun_compiler.args();
 
-    fun_compiler.parser.consume(.right_paren, "Expect ')' after function parameters.");
+    fun_compiler.parser.consume(.right_paren, "Expect ')' after parameters.");
     fun_compiler.parser.consume(.left_brace, "Expect '{' before function body.");
     try fun_compiler.block();
 
@@ -865,7 +870,7 @@ fn compileFunction(compiler: *Compiler, function_type: FunctionType) !void {
 }
 
 fn method(compiler: *Compiler) !void {
-    compiler.parser.consume(.identifier, "Expected method name.");
+    compiler.parser.consume(.identifier, "Expect method name.");
     const name_raw = compiler.parser.previous.?;
     const name = try compiler.identifierConstant(name_raw);
 
@@ -1007,17 +1012,150 @@ test "Chunk compilation" {
         // zig fmt: off
         @intFromEnum(Chunk.Opcode.constant), 0,
         @intFromEnum(Chunk.Opcode.constant), 1,
-        @intFromEnum(Chunk.Opcode.add),
         @intFromEnum(Chunk.Opcode.constant), 2,
         @intFromEnum(Chunk.Opcode.multiply),
         @intFromEnum(Chunk.Opcode.constant), 3,
         @intFromEnum(Chunk.Opcode.divide),
+        @intFromEnum(Chunk.Opcode.add),
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.nil),
         @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
     }, func.chunk.code[0..func.chunk.count]);
     try std.testing.expectEqualSlices(values.Value, &[_]values.Value{.{ .number = 1}, .{ .number = 2}, .{ .number = 3}, .{ .number = 4}}, func.chunk.constants.items);
+}
+
+test "Precedence" {
+    const source =
+        \\ // * has higher precedence than +.
+        \\ print 2 + 3 * 4; // expect: 14
+        \\
+       \\ // * has higher precedence than -.
+       \\ print 20 - 3 * 4; // expect: 8
+       \\
+       \\ // / has higher precedence than +.
+       \\ print 2 + 6 / 3; // expect: 4
+       \\
+       \\ // / has higher precedence than -.
+       \\ print 2 - 6 / 3; // expect: 0
+       \\
+       \\ // < has higher precedence than ==.
+       \\ print false == 2 < 1; // expect: true
+       \\
+       \\ // > has higher precedence than ==.
+       \\ print false == 1 > 2; // expect: true
+       \\
+       \\ // <= has higher precedence than ==.
+       \\ print false == 2 <= 1; // expect: true
+       \\
+       \\ // >= has higher precedence than ==.
+       \\ print false == 1 >= 2; // expect: true
+       \\
+       \\ // 1 - 1 is not space-sensitive.
+       \\ print 1 - 1; // expect: 0
+       \\ print 1 -1;  // expect: 0
+       \\ print 1- 1;  // expect: 0
+       \\ print 1-1;   // expect: 0
+       \\
+       \\ // Using () for grouping.
+       \\ print (2 * (6 - (2 + 2))); // expect: 4
+       \\
+    ;
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
+
+    var compiler = try Compiler.init(&manager, .script);
+    const func = try compiler.compile(source, );
+    try std.testing.expectEqualSlices(u8, &[_]u8{
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.constant), 2,
+        @intFromEnum(Chunk.Opcode.multiply),
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.constant), 3,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.constant), 2,
+        @intFromEnum(Chunk.Opcode.multiply),
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 4,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.divide),
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 4,
+        @intFromEnum(Chunk.Opcode.constant), 1,
+        @intFromEnum(Chunk.Opcode.divide),
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.false),
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.less),
+        @intFromEnum(Chunk.Opcode.equal),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.false),
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.greater),
+        @intFromEnum(Chunk.Opcode.equal),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.false),
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.greater),
+        @intFromEnum(Chunk.Opcode.not),
+        @intFromEnum(Chunk.Opcode.equal),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.false),
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.less),
+        @intFromEnum(Chunk.Opcode.not),
+        @intFromEnum(Chunk.Opcode.equal),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.print),
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.constant), 5,
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.print),
+
+
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 4,
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.constant), 0,
+        @intFromEnum(Chunk.Opcode.add),
+        @intFromEnum(Chunk.Opcode.subtract),
+        @intFromEnum(Chunk.Opcode.multiply),
+        @intFromEnum(Chunk.Opcode.print),
+
+        @intFromEnum(Chunk.Opcode.nil),
+        @intFromEnum(Chunk.Opcode.@"return"),
+    }, func.chunk.code[0..func.chunk.count]);
 }
 test "Chapter 17 Challenge 1" {
     const source =
@@ -1096,43 +1234,43 @@ test "Chapter 21: Globals" {
     try std.testing.expectEqualStrings("cafe au lait", func.chunk.constants.items[4].object.as(Object.String).data);
 }
 
-// test "Chapter 22: Conflicting locals" {
-//     const source =
-//         \\ {
-//         \\   var a = "test";
-//         \\   var a = "another";
-//         \\ }
-//         ;
+test "Chapter 22: Conflicting locals" {
+    const source =
+        \\ {
+        \\   var a = "test";
+        \\   var a = "another";
+        \\ }
+        ;
 
-//     var manager: Manager = undefined;
-//     manager.init(std.testing.allocator);
-//     defer manager.deinit();
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
 
-//     var compiler = try Compiler.init(&manager, .script);
+    var compiler = try Compiler.init(&manager, .script);
 
-//     const res = try compiler.compile(source);
-//     try std.testing.expectError(error.ParseError, res);
-// }
+    const res = compiler.compile(source);
+    try std.testing.expectError(error.ParseError, res);
+}
 
-// test "Chapter 22: Shadow access" {
-//     const source =
-//         \\ {
-//         \\   var a = "test";
-//         \\   {
-//         \\      var a = a;
-//         \\   }
-//         \\ }
-//         ;
+test "Chapter 22: Shadow access" {
+    const source =
+        \\ {
+        \\   var a = "test";
+        \\   {
+        \\      var a = a;
+        \\   }
+        \\ }
+        ;
 
-//     var manager: Manager = undefined;
-//     manager.init(std.testing.allocator);
-//     defer manager.deinit();
+    var manager: Manager = undefined;
+    manager.init(std.testing.allocator);
+    defer manager.deinit();
 
-//     var compiler = try Compiler.init(&manager, .script);
+    var compiler = try Compiler.init(&manager, .script);
 
-//     const result = compiler.compile(source);
-//     try std.testing.expectError(error.ParseError, result);
-// }
+    const result = compiler.compile(source);
+    try std.testing.expectError(error.ParseError, result);
+}
 
 test "Chapter 22: variables" {
     const source =
@@ -1296,6 +1434,57 @@ test "Chapter 23: for statements" {
         \\     print i;
         \\ }
         \\
+        \\ // Single-expression body.
+\\ for (var c = 0; c < 3;) print c = c + 1;
+\\ // expect: 1
+\\ // expect: 2
+\\ // expect: 3
+\\
+\\ // Block body.
+\\ for (var a = 0; a < 3; a = a + 1) {
+\\   print a;
+\\ }
+\\ // expect: 0
+\\ // expect: 1
+\\ // expect: 2
+\\
+\\ // No clauses.
+\\ fun foo() {
+\\   for (;;) return "done";
+\\ }
+\\ print foo(); // expect: done
+\\
+\\ // No variable.
+\\ var i = 0;
+\\ for (; i < 2; i = i + 1) print i;
+\\ // expect: 0
+\\ // expect: 1
+\\
+\\ // No condition.
+\\ fun bar() {
+\\   for (var i = 0;; i = i + 1) {
+\\     print i;
+\\     if (i >= 2) return;
+\\   }
+\\ }
+\\ bar();
+\\ // expect: 0
+\\ // expect: 1
+\\ // expect: 2
+\\
+\\ // No increment.
+\\ for (var i = 0; i < 2;) {
+\\   print i;
+\\   i = i + 1;
+\\ }
+\\ // expect: 0
+\\ // expect: 1
+\\
+\\ // Statement bodies.
+\\ for (; false;) if (true) 1; else 2;
+\\ for (; false;) while (true) 1;
+\\ for (; false;) for (;;) 1;
+        \\
         ;
 
     var manager: Manager = undefined;
@@ -1325,10 +1514,8 @@ test "Chapter 23: for statements" {
         @intFromEnum(Chunk.Opcode.loop), 0, 0x11,
         @intFromEnum(Chunk.Opcode.pop),
         @intFromEnum(Chunk.Opcode.pop),
-        @intFromEnum(Chunk.Opcode.nil),
-        @intFromEnum(Chunk.Opcode.@"return"),
         // zig fmt: on
-    }, func.chunk.code[0..func.chunk.count]);
+    }, func.chunk.code[0..33]);
 }
 
 test "Chapter 24: function declaration" {

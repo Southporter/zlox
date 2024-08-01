@@ -40,7 +40,7 @@ pub const Manager = struct {
             object_count += 1;
             object = obj.next;
         }
-        std.debug.print("\nRan GC {d} times!!! There were {d} objects. Final GC threshold: {d}\n", .{ manager.times_collected, object_count, manager.next_gc });
+        std.log.debug("\nRan GC {d} times!!! There were {d} objects. Final GC threshold: {d}\n", .{ manager.times_collected, object_count, manager.next_gc });
         manager.gray_stack.deinit();
         manager.arena.deinit();
     }
@@ -190,7 +190,7 @@ pub const Manager = struct {
         defer manager.is_collecting = false;
 
         manager.times_collected += 1;
-        log.info("-- gc begin\n", .{});
+        log.debug("-- gc begin\n", .{});
         const before = manager.bytes_allocated;
 
         manager.gray_stack.clearRetainingCapacity();
@@ -201,9 +201,9 @@ pub const Manager = struct {
 
         manager.removeWhiteStrings();
 
-        log.info("-- gc end\n", .{});
-        log.info("   before {d}; after {d}\n", .{ before, manager.bytes_allocated });
-        log.info("   collected {d} bytes; next at {d}\n", .{ before - manager.bytes_allocated, manager.next_gc });
+        log.debug("-- gc end\n", .{});
+        log.debug("   before {d}; after {d}\n", .{ before, manager.bytes_allocated });
+        log.debug("   collected {d} bytes; next at {d}\n", .{ before - manager.bytes_allocated, manager.next_gc });
     }
 
     fn markRoots(manager: *Manager) !void {
@@ -229,7 +229,7 @@ pub const Manager = struct {
 
     fn traceReferences(manager: *Manager) !void {
         while (manager.gray_stack.popOrNull()) |obj| {
-            log.info("Blackening object: {any}\n", .{obj});
+            log.debug("Blackening object: {any}\n", .{obj});
             try manager.blackenObject(obj);
         }
     }

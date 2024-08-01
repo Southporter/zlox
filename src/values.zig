@@ -89,7 +89,7 @@ const Printer = *const fn (comptime []const u8, anytype) void;
 pub fn print(value: Value, printer: Printer) void {
     switch (value) {
         .number => printer("{d}", .{value.number}),
-        .boolean => printer("{}", .{value.boolean}),
+        .boolean => printer("{any}", .{value.boolean}),
         .nil => printer("nil", .{}),
         .object => printObject(value.object, printer),
     }

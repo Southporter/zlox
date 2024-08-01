@@ -189,7 +189,7 @@ pub const Function = struct {
         const has_next = function.object.next != null;
 
         try writer.print("Function[has_next: {any}, is_marked: {any}, arity: {d}, upvalue_count: {d}, name: {s}]", .{
-            has_next, function.object.is_marked, function.arity, function.upvalue_count, function.name,
+            has_next, function.object.is_marked, function.arity, function.upvalue_count, if (function.name) |name| name.data else "script",
         });
     }
 };
@@ -252,7 +252,11 @@ pub const Closure = struct {
         _ = fmt;
         _ = options;
 
-        try writer.print("Closure{{has_next: {}, is_marked: {}, function: {any} }}", .{ closure.object.next != null, closure.object.is_marked, closure.function });
+        try writer.print("Closure[has_next: {any}, is_marked: {any}, function: {s} ]", .{
+            closure.object.next != null,
+            closure.object.is_marked,
+            if (closure.function.name) |name| name.data else "script",
+        });
     }
 };
 

@@ -35,8 +35,14 @@ pub fn runFile(filename: []const u8, allocator: std.mem.Allocator) !void {
     vm.init(allocator);
     defer vm.deinit();
     try vm.addNatives();
-    const val = try vm.interpret(input);
-    values.print(val, log.info);
+    _ = vm.interpret(input) catch |err| {
+        switch (err) {
+            error.RuntimeError => std.process.exit(70),
+            error.CompileError => std.process.exit(65),
+            else => {},
+        }
+    };
+    // values.print(val, log.info);
 }
 
 test {

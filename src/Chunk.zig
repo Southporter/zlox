@@ -22,16 +22,16 @@ pub const Opcode = enum(u8) {
     method,
     constant,
     define_global,
-    get_global, // 0x10
-    set_global,
+    get_global,
+    set_global, // 0x10
     get_local,
     set_local,
     get_upvalue,
     set_upvalue,
     close_upvalue,
     get_property,
-    set_property, // 0x18
-    get_super,
+    set_property,
+    get_super, // 0x18
     nil,
     true,
     false,

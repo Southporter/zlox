@@ -119,7 +119,7 @@ fn closureInstruction(chunk: *Chunk, offset: usize, writer: anytype) !usize {
 
 pub fn printValue(constant: values.Value, writer: anytype) !void {
     switch (constant) {
-        .number => |val| try writer.print("{any}", .{val}),
+        .number => |val| try writer.print("{d}", .{val}),
         .boolean => |val| try writer.print("{}", .{val}),
         .nil => _ = try writer.write("nil"),
         .object => |obj| try printObject(obj, writer),
@@ -128,7 +128,7 @@ pub fn printValue(constant: values.Value, writer: anytype) !void {
 
 fn printObject(obj: *Object, writer: anytype) !void {
     switch (obj.tag) {
-        .string => try writer.print("\"{s}\"", .{obj.as(Object.String).data}),
+        .string => try writer.print("{s}", .{obj.as(Object.String).data}),
         .function => {
             const fun = obj.as(Object.Function);
             if (fun.name) |n| {
@@ -138,12 +138,12 @@ fn printObject(obj: *Object, writer: anytype) !void {
             }
         },
         .closure => {
-            _ = try writer.write("<closure ");
+            // _ = try writer.write("<closure ");
             try printObject(&obj.as(Object.Closure).function.object, writer);
-            _ = try writer.write(" >");
+            // _ = try writer.write(" >");
         },
         .native => {
-            _ = try writer.write("<fn native>");
+            _ = try writer.write("<native fn>");
         },
         .upvalue => _ = try writer.write("<upvalue>"),
         .class => try writer.print("{s}", .{obj.as(Object.Class).name}),
@@ -229,7 +229,7 @@ test "Simple dissassembly" {
     const output =
         \\== test ==
         \\0000  123 OP_RETURN
-        \\0001    | OP_CONSTANT         0 3.14e0
+        \\0001    | OP_CONSTANT         0 3.14
         \\0003  124 OP_NEGATE
         \\0004    | OP_ADD
         \\0005    | OP_SUBTRACT
@@ -241,7 +241,7 @@ test "Simple dissassembly" {
         \\0011    | OP_EQUAL
         \\0012    | OP_GREATER
         \\0013    | OP_LESS
-        \\0014  126 OP_DEFINE_GLOBAL    1 4.2e1
+        \\0014  126 OP_DEFINE_GLOBAL    1 42
         \\0016  127 OP_GET_LOCAL        0
         \\0018    | OP_SET_LOCAL       13
         \\0020  128 OP_JUMP            20 -> 35
