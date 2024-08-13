@@ -24,7 +24,19 @@ pub fn repl(allocator: std.mem.Allocator) !void {
         }
         // const res = compiler.compile(line[0..count]) catch continue;
         // const val = vm.interpretFunction(res) catch continue;
-        const val = try vm.interpret(line[0..count]);
+        const val = vm.interpret(line[0..count]) catch |err| blk: {
+            switch (err) {
+                error.RuntimeError => {
+                    log.err("RuntimeError\n", .{});
+                    break :blk values.NIL_VAL;
+                },
+                error.CompileError => {
+                    log.err("CompileError\n", .{});
+                    break :blk values.NIL_VAL;
+                },
+                else => return,
+            }
+        };
         values.print(val, log.info);
     }
 }
