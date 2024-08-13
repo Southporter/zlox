@@ -113,6 +113,7 @@ pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
     const closure = try vm.manager.allocClosure(function);
     _ = vm.pop();
     vm.push(.{ .object = &closure.object });
+    defer _ = vm.pop();
     try vm.call(closure, 0);
     return vm.run();
 }

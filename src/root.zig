@@ -15,15 +15,16 @@ pub fn repl(allocator: std.mem.Allocator) !void {
     vm.init(allocator);
     defer vm.deinit();
     try vm.addNatives();
-    var compiler = try Compiler.init(&vm.manager, .script);
+    // var compiler = try Compiler.init(&vm.manager, .script);
     while (true) {
         _ = try out.write("> ");
         const count = try in.read(&line);
         if (std.ascii.eqlIgnoreCase(line[0..count], "quit\n")) {
             return;
         }
-        const res = compiler.compile(line[0..count]) catch continue;
-        const val = vm.interpretFunction(res) catch continue;
+        // const res = compiler.compile(line[0..count]) catch continue;
+        // const val = vm.interpretFunction(res) catch continue;
+        const val = try vm.interpret(line[0..count]);
         values.print(val, log.info);
     }
 }
