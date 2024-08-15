@@ -1,4 +1,5 @@
 const std = @import("std");
+const tracer = @import("tracer");
 const Object = @This();
 const assert = std.debug.assert;
 const Chunk = @import("Chunk.zig");
@@ -52,6 +53,8 @@ pub fn equal(a: *Object, b: *Object) bool {
 }
 
 pub fn as(object: *Object, comptime T: type) *T {
+    const t = tracer.trace(@src(), "Object.as", .{});
+    defer t.end();
     assert(object.tag == T.tag());
     return @alignCast(@fieldParentPtr("object", object));
 }

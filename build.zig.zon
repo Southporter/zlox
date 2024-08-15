@@ -51,6 +51,10 @@
         //    // actually used.
         //    .lazy = false,
         //},
+        .@"zig-tracer" = .{
+            .url = "git+https://github.com/Southporter/zig-tracer#321f00040662d008ee5f4b263ea8508de89b93ff",
+            .hash = "12205b06047176859889df430f5facfbeced4af20da199fb491028090d60b2c16143",
+        },
     },
 
     // Specifies the set of files and directories that are included in this package.

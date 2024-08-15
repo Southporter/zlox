@@ -1,6 +1,9 @@
 const std = @import("std");
 const zlox = @import("zlox");
+const tracer = @import("tracer");
 const builtin = @import("builtin");
+
+pub const tracer_impl = tracer.spall;
 
 pub const std_options = .{
     .logFn = logFn,
@@ -59,6 +62,12 @@ pub fn main() !void {
             \\
         );
     }
+
+    try tracer.init();
+    defer tracer.deinit();
+
+    try tracer.init_thread(null);
+    defer tracer.deinit_thread();
     if (file) |f| {
         try zlox.runFile(f, allocator);
     } else {

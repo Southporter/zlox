@@ -1,4 +1,5 @@
 const std = @import("std");
+const tracer = @import("tracer");
 const Compiler = @This();
 const Chunk = @import("Chunk.zig");
 const Parser = @import("Parser.zig");
@@ -254,6 +255,9 @@ pub fn init(manager: *Manager, function_type: FunctionType) !Compiler {
 }
 
 pub fn compile(compiler: *Compiler, source: []const u8) !*Object.Function {
+    const t = tracer.trace(@src(), "compile", .{});
+    defer t.end();
+
     compiler.parser = .{
         .scanner = Scanner{ .source = source },
     };
