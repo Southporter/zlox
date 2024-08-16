@@ -1,4 +1,5 @@
 const std = @import("std");
+const tracer = @import("tracer");
 const Table = @This();
 const Object = @import("Object.zig");
 const values = @import("values.zig");
@@ -55,6 +56,8 @@ pub fn addAll(to: *Table, from: *Table) !void {
 }
 
 pub fn get(table: *Table, key: *Object.String) ?Value {
+    const t = tracer.trace(@src(), "Table.get({s})", .{key.data});
+    defer t.end();
     if (table.count == 0) return null;
     const entry = table.findEntry(key);
     if (entry.key) |_| {
@@ -76,19 +79,35 @@ pub fn delete(table: *Table, key: *Object.String) bool {
 }
 
 fn findEntry(table: *Table, key: *Object.String) *Entry {
+    const t = tracer.trace(@src(), "Table.findEntry({s})", .{key.data});
+    defer t.end();
+
+    const cap_t = tracer.trace(@src(), "Table.findEntry CAP", .{});
     const cap = table.entries.len;
-    var index = key.hash % cap;
+    const mask = cap - 1;
+    cap_t.end();
+
+    const index_t = tracer.trace(@src(), "Table.findEntry INDEX MOD", .{});
+    var index = key.hash & mask;
+    index_t.end();
     var tombstone: ?*Entry = null;
     while (true) {
+        const i_t = tracer.trace(@src(), "Table.findEntry({s}) at {d}", .{ key.data, index });
+        defer i_t.end();
+
         const entry = &table.entries[index];
 
         if (entry.key) |k| {
-            if (key == k) {
+            const key_t = tracer.trace(@src(), "Table key comparison", .{});
+            defer key_t.end();
+            if (@intFromPtr(key) == @intFromPtr(k)) {
                 return entry;
             }
         } else {
+            const key_t = tracer.trace(@src(), "Table key null", .{});
+            defer key_t.end();
             switch (entry.value) {
-                .nil => return if (tombstone) |t| t else entry,
+                .nil => return if (tombstone) |stone| stone else entry,
                 .boolean => |b| {
                     std.debug.assert(b);
                     tombstone = entry;
@@ -97,11 +116,16 @@ fn findEntry(table: *Table, key: *Object.String) *Entry {
             }
         }
 
-        index = (index + 1) % cap;
+        const i_mod_t = tracer.trace(@src(), "Table index wrap", .{});
+        defer i_mod_t.end();
+        index = (index + 1) & mask;
     }
 }
 
 fn grow(table: *Table) !void {
+    const t = tracer.trace(@src(), "Table.grow", .{});
+    defer t.end();
+
     const new_cap = if (table.entries.len < 8) 8 else table.entries.len * 2;
     const old_entries = table.entries;
     defer table.allocator.free(old_entries);

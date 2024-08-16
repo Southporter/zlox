@@ -2,6 +2,8 @@ const std = @import("std");
 const std_builtin = @import("builtin");
 const log = std.log.scoped(.vm);
 
+const tracer = @import("tracer");
+
 const VM = @This();
 const Compiler = @import("Compiler.zig");
 const Chunk = @import("Chunk.zig");
@@ -103,12 +105,16 @@ pub fn deinit(vm: *VM) void {
 pub const Error = error{ CompileError, RuntimeError } || Manager.Error || Object.NativeError;
 
 pub fn interpret(vm: *VM, input: []const u8) Error!Value {
+    const t = tracer.trace(@src(), "interpret", .{});
+    defer t.end();
     vm.root_compiler = try Compiler.init(&vm.manager, .script);
     const func = vm.root_compiler.compile(input) catch return error.CompileError;
     return try vm.interpretFunction(func);
 }
 
 pub fn interpretFunction(vm: *VM, function: *Object.Function) Error!Value {
+    const t = tracer.trace(@src(), "interpretFunction", .{});
+    defer t.end();
     vm.push(.{ .object = &function.object });
     const closure = try vm.manager.allocClosure(function);
     _ = vm.pop();
@@ -123,6 +129,8 @@ pub fn run(vm: *VM) Error!Value {
 
     try debug.disassembleChunk(frame.chunk(), frame.getName(), debug.Writer);
     while (true) {
+        const t = tracer.trace(@src(), "runLoop", .{});
+        defer t.end();
         vm.printStack(log.debug);
         _ = debug.disassembleInstruction(frame.chunk(), @intFromPtr(frame.ip) - @intFromPtr(frame.chunk().code.ptr), debug.Writer) catch {};
         const op: Chunk.Opcode = @enumFromInt(frame.readByte());
@@ -171,6 +179,9 @@ pub fn run(vm: *VM) Error!Value {
                 frame = &vm.frames[vm.frame_count - 1];
             },
             .closure => {
+                const get_t = tracer.trace(@src(), "closure", .{});
+                defer get_t.end();
+
                 const fun = frame.readConstant().object.as(Object.Function);
                 const closure = try vm.manager.allocClosure(fun);
                 vm.push(.{ .object = &closure.object });
@@ -212,6 +223,8 @@ pub fn run(vm: *VM) Error!Value {
                 _ = vm.pop();
             },
             .get_global => {
+                const global_t = tracer.trace(@src(), "get_global", .{});
+                defer global_t.end();
                 const name = frame.readConstant().object.as(Object.String);
                 const value = vm.globals.get(name);
 
@@ -223,6 +236,8 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .set_global => {
+                const global_t = tracer.trace(@src(), "set_global", .{});
+                defer global_t.end();
                 const name = frame.readConstant().object.as(Object.String);
                 const is_new = try vm.globals.set(name, vm.peek(0));
                 if (is_new) {
@@ -252,6 +267,8 @@ pub fn run(vm: *VM) Error!Value {
                 _ = vm.pop();
             },
             .get_property => {
+                const get_t = tracer.trace(@src(), "get_property", .{});
+                defer get_t.end();
                 if (!vm.peek(0).isInstance()) {
                     vm.runtimeError("Only instances have properties.\n", .{});
                     return error.RuntimeError;
@@ -268,6 +285,9 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .set_property => {
+                const set_t = tracer.trace(@src(), "set_property", .{});
+                defer set_t.end();
+
                 if (!vm.peek(1).isInstance()) {
                     vm.runtimeError("Only instances have fields.\n", .{});
                     return error.RuntimeError;
@@ -313,6 +333,8 @@ pub fn run(vm: *VM) Error!Value {
                 vm.push(.{ .boolean = a.equal(b) });
             },
             .add => {
+                const add_t = tracer.trace(@src(), "add", .{});
+                defer add_t.end();
                 if (vm.peek(0).isString() and vm.peek(1).isString()) {
                     try vm.concatenate();
                 } else if (vm.peek(0).isNumber() and vm.peek(1).isNumber()) {
@@ -325,6 +347,8 @@ pub fn run(vm: *VM) Error!Value {
                 }
             },
             .subtract, .multiply, .divide, .less, .greater => {
+                const arith_t = tracer.trace(@src(), "arith_and_compare", .{});
+                defer arith_t.end();
                 if (!vm.peek(0).isNumber() or !vm.peek(1).isNumber()) {
                     vm.runtimeError("Operands must be numbers.\n", .{});
                     return error.RuntimeError;
@@ -365,6 +389,8 @@ fn get(vm: *VM, distance: usize) *Value {
 }
 
 fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
+    const t = tracer.trace(@src(), "callValue", .{});
+    defer t.end();
     if (std.meta.activeTag(callee) == .object) {
         switch (callee.object.tag) {
             .closure => return vm.call(callee.object.as(Object.Closure), arg_count),
@@ -406,6 +432,8 @@ fn callValue(vm: *VM, callee: Value, arg_count: u8) !void {
 }
 
 fn invokeFromClass(vm: *VM, class: *Object.Class, name: *Object.String, arg_count: u8) !void {
+    const t = tracer.trace(@src(), "invokeFromClass", .{});
+    defer t.end();
     if (class.methods.get(name)) |method| {
         return vm.call(method.object.as(Object.Closure), arg_count);
     } else {
@@ -415,6 +443,9 @@ fn invokeFromClass(vm: *VM, class: *Object.Class, name: *Object.String, arg_coun
 }
 
 fn invoke(vm: *VM, name: *Object.String, arg_count: u8) !void {
+    const t = tracer.trace(@src(), "invoke", .{});
+    defer t.end();
+
     const receiver = vm.peek(arg_count);
     if (!receiver.isInstance()) {
         vm.runtimeError("Only instances have methods.\n", .{});
@@ -442,6 +473,9 @@ fn bindMethod(vm: *VM, class: *Object.Class, name: *Object.String) !?Value {
 }
 
 fn call(vm: *VM, closure: *Object.Closure, arg_count: u8) !void {
+    const t = tracer.trace(@src(), "call", .{});
+    defer t.end();
+
     if (arg_count != closure.function.arity) {
         vm.runtimeError("Expected {d} arguments but got {d}.\n", .{ closure.function.arity, arg_count });
         return error.RuntimeError;
@@ -458,6 +492,8 @@ fn call(vm: *VM, closure: *Object.Closure, arg_count: u8) !void {
 }
 
 fn captureUpvalue(vm: *VM, local: *Value) !*Object.Upvalue {
+    const t = tracer.trace(@src(), "captureUpvalue", .{});
+    defer t.end();
     var prevUpvalue: ?*Object.Upvalue = null;
     var upvalue = vm.openUpvalues;
     while (upvalue != null and @intFromPtr(upvalue.?.location) > @intFromPtr(local)) {
@@ -479,7 +515,11 @@ fn captureUpvalue(vm: *VM, local: *Value) !*Object.Upvalue {
 }
 
 fn closeUpvalues(vm: *VM, last: *Value) void {
+    const t = tracer.trace(@src(), "closeUpvalues", .{});
+    defer t.end();
     while (vm.openUpvalues != null and @intFromPtr(vm.openUpvalues.?.location) >= @intFromPtr(last)) {
+        const up_t = tracer.trace(@src(), "closeUpvalue", .{});
+        defer up_t.end();
         var upvalue = vm.openUpvalues.?;
         upvalue.closed = upvalue.location.*;
         upvalue.location = &upvalue.closed;
@@ -496,6 +536,8 @@ fn defineMethod(vm: *VM, name: *Object.String) !void {
 }
 
 fn concatenate(vm: *VM) !void {
+    const t = tracer.trace(@src(), "concatenate", .{});
+    defer t.end();
     const str_b = vm.peek(0).object.as(Object.String);
     const str_a = vm.peek(1).object.as(Object.String);
 

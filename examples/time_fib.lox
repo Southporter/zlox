@@ -4,6 +4,6 @@ fun fib(n) {
 }
 
 var start = clock();
-print(fib(35));
+print(fib(10));
 print("\n");
 print(clock() - start);

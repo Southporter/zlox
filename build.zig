@@ -50,6 +50,11 @@ pub fn build(b: *std.Build) void {
     });
     exe_check.root_module.addImport("zlox", &lib.root_module);
 
+    const tracer = b.dependency("zig-tracer", .{});
+    exe_check.root_module.addImport("tracer", tracer.module("tracer"));
+    exe.root_module.addImport("tracer", tracer.module("tracer"));
+    lib.root_module.addImport("tracer", tracer.module("tracer"));
+
     const check = b.step("check", "Check if zlox compiles");
     check.dependOn(&exe_check.step);
 
